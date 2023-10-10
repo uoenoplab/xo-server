@@ -88,6 +88,8 @@ struct http_client {
 
 struct http_client *http_clients[65536] = { NULL };;
 rados_t cluster;
+char *client_data_buffer;
+size_t BUF_SIZE = sizeof(char) * 1024 * 4096;
 
 void get_datetime_str(char *buf, size_t length)
 {
@@ -632,15 +634,11 @@ void handle_client_disconnect(int epoll_fd, int client_fd)
 
 void handle_client_data(int epoll_fd, int client_fd)
 {
-	char *buffer;
 	ssize_t bytes_received;
 
-	size_t BUF_SIZE = sizeof(char) * 1024 * 4096;
-	buffer = malloc(BUF_SIZE);
-
 	while (1) {
-		memset(buffer, 0, BUF_SIZE);
-		bytes_received = recv(client_fd, buffer, BUF_SIZE, 0);
+		memset(client_data_buffer, 0, BUF_SIZE);
+		bytes_received = recv(client_fd, client_data_buffer, BUF_SIZE, 0);
 		if (bytes_received <= 0) {
 			// Client closed the connection or an error occurred
 			if (bytes_received == 0) {
@@ -654,18 +652,16 @@ void handle_client_data(int epoll_fd, int client_fd)
 			break;
 		}
 		printf("recv %ld bytes\n", bytes_received);
-		//printByteArrayHex(buffer, bytes_received);
-
 		struct http_client *client = http_clients[client_fd];
 		enum llhttp_errno ret;
 
 		// Echo the received data back to the client
-		ret = llhttp_execute(&(client->parser), buffer, bytes_received);
+		ret = llhttp_execute(&(client->parser), client_data_buffer, bytes_received);
 		if (ret != HPE_OK) {
 			fprintf(stderr, "Parse error: %s %s\n", llhttp_errno_name(ret), client->parser.reason);
 		}
 		if (client->parsing) {
-			put_object(client, buffer, bytes_received);
+			put_object(client, client_data_buffer, bytes_received);
 		}
 	}
 	free(buffer);
@@ -677,6 +673,8 @@ int main(int argc, char *argv[])
 	struct sockaddr_in server_addr, client_addr;
 	socklen_t client_len = sizeof(client_addr);
 	struct epoll_event event, events[MAX_EVENTS];
+
+	client_data_buffer = malloc(BUF_SIZE);
 
 	int err;
 
@@ -760,6 +758,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	free(client_data_buffer);
 	close(server_fd);
 	close(epoll_fd);
 	rados_shutdown(cluster);
