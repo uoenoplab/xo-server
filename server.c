@@ -14,6 +14,8 @@
 #include <libxml/tree.h>
 #include <llhttp.h>
 
+#include "md5.h"
+
 #define PORT 8080
 #define MAX_EVENTS 1000
 #define MAX_FIELDS 64
@@ -81,6 +83,7 @@ struct http_client {
 
 	size_t current_chunk_size;
 	size_t current_chunk_offset;
+	RollingMD5Context md5_ctx;
 };
 
 struct http_client *http_clients[65536] = { NULL };;
@@ -168,65 +171,90 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 
 	size_t current_chunk_size = client->current_chunk_size;
 	size_t current_chunk_offset = client->current_chunk_offset;
-	printf("calling put object length %ld\n", length);
+	printf("calling put object length %ld current_chunk_size %ld current_chunk_offset %ld\n", length, current_chunk_size, current_chunk_offset);
 
 	while (length > 0) {
+		printf("beginning of loop: current_chunk_size=%ld current_chunk_offset=%ld\n", current_chunk_size, current_chunk_offset);
 		// 1. we are starting a chunk
 		// 2. we are in a middle of a chunk
 		// 3. we are working towards the end of a chunk
 		if (current_chunk_size == 0 && current_chunk_offset == 0) {
-			printf("%p\n", buf);
 			char *chunk_size_start = ptr;
+			printByteArrayHex(chunk_size_start, 16);
 			char *chunk_size_end = memmem(chunk_size_start, length, ";chunk-signature=", strlen(";chunk-signature="));
 			char *chunk_size_str = strndup(chunk_size_start, chunk_size_end - chunk_size_start);
 			current_chunk_size = strtol(chunk_size_str, NULL, 16);
+			printf("chunk_size: %ld\n", current_chunk_size); 
 
-			char *chunk_data_start = memmem(chunk_size_end, length - (chunk_size_end - ptr), "\r\n", 2) + 2;
-			//printByteArrayHex(chunk_data_start, length - (chunk_data_start - buf));
-			char *chunk_data_end = memmem(chunk_data_start, length - (chunk_data_start - ptr), "\r\n", 2);
-			if (chunk_data_end == NULL) {
-				chunk_data_end = ptr + length;
-				printf("fail to find chunk data end\n");
+			length -= chunk_size_end - chunk_size_start;
+			char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2) + 2;
+			char *chunk_data_end = NULL;
+			length -= chunk_data_start - chunk_size_end;
+			if (length > current_chunk_size) {
+				chunk_data_end = chunk_data_start + current_chunk_size;
 			}
+			else {
+				chunk_data_end = chunk_data_start + length;
+			}
+			//printByteArrayHex(chunk_data_start, length - (chunk_data_start - buf));
 			size_t data_len = (char*)chunk_data_end - (char*)chunk_data_start;
-			current_chunk_offset = 0;
-
-			printf("FIRST write to rados object name %s data_len %ld chunk_size %ld length %ld\n", client->object_name, data_len, current_chunk_size, length);
 			ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
 			if (ret) {
 				fprintf(stderr, "fail to write to rados\n");
 			}
+			updateRollingMD5(&(client->md5_ctx), chunk_data_start, data_len);
 
 			client->object_offset += data_len;
-			ptr += data_len; 
 			current_chunk_offset += data_len;
+			ptr = chunk_data_end;
 			length -= data_len;
+			printf("FIRST write to rados object name %s data_len %ld chunk_size %ld chunk_offset %ld length %ld\n", client->object_name, data_len, current_chunk_size, current_chunk_offset, length);
 
 			free(chunk_size_str);
+			printByteArrayHex(ptr, 16);
+			printf("%.*s\n", 88, ptr);
 		}
 		else if (current_chunk_offset < current_chunk_size) {
 			// check if this chunk is ending
 			char *chunk_data_start = ptr;
-			char *chunk_data_end = strstr(chunk_data_start, "\r\n");
-			if (chunk_data_end == NULL) {
-				// chunk not ending yet
-				chunk_data_end = ptr + length;
+			printByteArrayHex(chunk_data_start, 16);
+			char *chunk_data_end = NULL;
+			if (current_chunk_offset + length > current_chunk_size) {
+				printf("second chunk ending\n");
+				chunk_data_end = chunk_data_start + (current_chunk_size - current_chunk_offset);
 			}
 			else {
-				chunk_data_end -= 3;
+				// chunk not ending yet
+				printf("second chunk not ending\n");
+				chunk_data_end = chunk_data_start + length;
+				//chunk_data_end -= 1;
 			}
 
 			size_t data_len = chunk_data_end - chunk_data_start;
 
-			printf("SECOND write to rados object name %s data_len %ld chunk_size %ld length %ld\n", client->object_name, data_len, current_chunk_size, length);
 			ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
-			current_chunk_offset += chunk_data_end - chunk_data_start;
-			ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
+			if (ret) {
+				fprintf(stderr, "fail to write to rados\n");
+			}
+			updateRollingMD5(&(client->md5_ctx), chunk_data_start, data_len);
 
+			if (current_chunk_offset + length > current_chunk_size) {
+				ptr = chunk_data_end + 2;
+			}
+			else {
+				ptr = chunk_data_end + 2;
+			}
 			client->object_offset += data_len;
-			ptr += data_len;
 			current_chunk_offset += data_len;
 			length -= data_len;
+			printf("SECOND write to rados object name %s data_len %ld chunk_size %ld chunk_offset %ld length %ld\n", client->object_name, data_len, current_chunk_size, current_chunk_offset, length);
+			printByteArrayHex(ptr, 16);
+			printf("%.*s\n", 88, ptr);
+		}
+		if (current_chunk_offset >= current_chunk_size) {
+			printf("currentl chunk is done, reset\n");
+			current_chunk_offset = 0;
+			current_chunk_size = 0;
 		}
 	}
 
@@ -282,6 +310,8 @@ void init_object_put_request(struct http_client *client) {
 		client->chunked_upload = true;
 		fprintf(stderr, "chunked upload\n");
 	}
+
+	initRollingMD5(&(client->md5_ctx));
 }
 
 int on_headers_complete_cb(llhttp_t* parser)
@@ -311,7 +341,7 @@ int on_headers_complete_cb(llhttp_t* parser)
 
 				// object scope exists
 				if (num_segments > 0) {
-					object_name_len += num_segments - 1;
+					object_name_len += num_segments;
 					client->object_name = malloc(sizeof(char) * (object_name_len + 1));
 					for (segment = client->uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
 						size_t len = segment->text.afterLast - segment->text.first;
@@ -389,6 +419,9 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
 		// if scopped to object, create object
+		unsigned char md5_hash[MD5_DIGEST_LENGTH];
+		finalizeRollingMD5(&(client->md5_ctx), md5_hash);
+		printf("etag: %02x\n", md5_hash); 
 		snprintf(response, response_buf_len, "%s\r\nx-amz-request-id: tx000009a75d393f1564ec2-0065202454-3771-default\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str);
 	}
 }
@@ -508,6 +541,7 @@ int on_message_complete_cb(llhttp_t* parser)
 
 	fprintf(stdout, "%s\n", response);
 	send(client->fd, response, strlen(response), 0);
+	reset_http_client(client);
 
 	return 0;
 }
@@ -515,9 +549,9 @@ int on_message_complete_cb(llhttp_t* parser)
 int on_reset_cb(llhttp_t *parser)
 {
 	struct http_client *client = (struct http_client*)parser->data;
-//	fprintf(stderr, "resetting http client for next message\n");
+	fprintf(stderr, "resetting http client for next message\n");
 //	reset_http_client(client);
-	sleep(1);
+	//sleep(1);
 	return 0;
 }
 
@@ -598,12 +632,15 @@ void handle_client_disconnect(int epoll_fd, int client_fd)
 
 void handle_client_data(int epoll_fd, int client_fd)
 {
-	char buffer[65536];
+	char *buffer;
 	ssize_t bytes_received;
 
+	size_t BUF_SIZE = sizeof(char) * 1024 * 4096;
+	buffer = malloc(BUF_SIZE);
+
 	while (1) {
-		memset(buffer, 0, sizeof(char) * 65536);
-		bytes_received = recv(client_fd, buffer, sizeof(buffer), MSG_PEEK);
+		memset(buffer, 0, BUF_SIZE);
+		bytes_received = recv(client_fd, buffer, BUF_SIZE, 0);
 		if (bytes_received <= 0) {
 			// Client closed the connection or an error occurred
 			if (bytes_received == 0) {
@@ -616,8 +653,8 @@ void handle_client_data(int epoll_fd, int client_fd)
 			handle_client_disconnect(epoll_fd, client_fd); // Handle client disconnection
 			break;
 		}
-		bytes_received = recv(client_fd, buffer, bytes_received, 0);
-		buffer[bytes_received] = 0;
+		printf("recv %ld bytes\n", bytes_received);
+		//printByteArrayHex(buffer, bytes_received);
 
 		struct http_client *client = http_clients[client_fd];
 		enum llhttp_errno ret;
@@ -631,6 +668,7 @@ void handle_client_data(int epoll_fd, int client_fd)
 			put_object(client, buffer, bytes_received);
 		}
 	}
+	free(buffer);
 }
 
 int main(int argc, char *argv[])
