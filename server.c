@@ -664,7 +664,6 @@ void handle_client_data(int epoll_fd, int client_fd)
 			put_object(client, client_data_buffer, bytes_received);
 		}
 	}
-	free(buffer);
 }
 
 int main(int argc, char *argv[])
