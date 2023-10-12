@@ -423,6 +423,19 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		// if scopped to object, create object
 		char md5_hash[MD5_DIGEST_LENGTH * 2 + 1];
 		finalizeRollingMD5(&(client->md5_ctx), md5_hash);
+
+		char metadata[4096];
+		snprintf(metadata, 4096, "%s;%s", datetime_str, md5_hash);
+		const size_t key_lens = strlen(client->object_name);
+		const size_t val_lens = strlen(metadata);
+		const char *keys = client->object_name;
+		const char *vals = metadata;
+
+		rados_write_op_t write_op = rados_create_write_op();
+		rados_write_op_omap_set2(write_op, &keys, &vals, &key_lens, &val_lens, 1);
+		rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
+		rados_release_write_op(write_op);
+
 		snprintf(response, response_buf_len, "%s\r\nEtag: %s\r\nx-amz-request-id: tx000009a75d393f1564ec2-0065202454-3771-default\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, datetime_str);
 	}
 }
