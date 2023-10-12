@@ -421,10 +421,9 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
 		// if scopped to object, create object
-		unsigned char md5_hash[MD5_DIGEST_LENGTH];
+		char md5_hash[MD5_DIGEST_LENGTH * 2 + 1];
 		finalizeRollingMD5(&(client->md5_ctx), md5_hash);
-		printf("etag: %02x\n", md5_hash); 
-		snprintf(response, response_buf_len, "%s\r\nx-amz-request-id: tx000009a75d393f1564ec2-0065202454-3771-default\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str);
+		snprintf(response, response_buf_len, "%s\r\nEtag: %s\r\nx-amz-request-id: tx000009a75d393f1564ec2-0065202454-3771-default\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, datetime_str);
 	}
 }
 
