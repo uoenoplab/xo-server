@@ -129,6 +129,7 @@ void free_http_client(struct http_client *client)
 	rados_ioctx_destroy(client->bucket_io_ctx);
 	rados_ioctx_destroy(client->data_io_ctx);
 	free(client);
+	printf("free client\n");
 }
 
 int on_header_field_cb(llhttp_t *parser, const char *at, size_t length)
@@ -171,25 +172,34 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 	int ret;
 	char *ptr = buf;
 
+	//printf("put_object: %s , length=%ld\n", buf, length);
 	size_t current_chunk_size = client->current_chunk_size;
 	size_t current_chunk_offset = client->current_chunk_offset;
-	printf("calling put object length %ld current_chunk_size %ld current_chunk_offset %ld\n", length, current_chunk_size, current_chunk_offset);
+	//printf("calling put object length %ld current_chunk_size %ld current_chunk_offset %ld\n", length, current_chunk_size, current_chunk_offset);
 
 	while (length > 0) {
-		printf("beginning of loop: current_chunk_size=%ld current_chunk_offset=%ld\n", current_chunk_size, current_chunk_offset);
+		//printf("beginning of loop: current_chunk_size=%ld current_chunk_offset=%ld\n", current_chunk_size, current_chunk_offset);
 		// 1. we are starting a chunk
 		// 2. we are in a middle of a chunk
 		// 3. we are working towards the end of a chunk
 		if (current_chunk_size == 0 && current_chunk_offset == 0) {
 			char *chunk_size_start = ptr;
-			printByteArrayHex(chunk_size_start, 16);
+			//printByteArrayHex(chunk_size_start, 16);
 			char *chunk_size_end = memmem(chunk_size_start, length, ";chunk-signature=", strlen(";chunk-signature="));
 			char *chunk_size_str = strndup(chunk_size_start, chunk_size_end - chunk_size_start);
 			current_chunk_size = strtol(chunk_size_str, NULL, 16);
-			printf("chunk_size: %ld\n", current_chunk_size); 
+			//printf("chunk_size: %ld ; ptr %s ; object size %ld object offset %ld\n", current_chunk_size, ptr, client->object_size, client->object_offset); 
 
 			length -= chunk_size_end - chunk_size_start;
-			char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2) + 2;
+			//char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2) + 2;
+			char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2);
+			if (chunk_data_start == NULL) {
+				printf("chunk start is null!!!\n");
+				exit(1);
+			}
+			else {
+				chunk_data_start += 2;
+			}
 			char *chunk_data_end = NULL;
 			length -= chunk_data_start - chunk_size_end;
 			if (length > current_chunk_size) {
@@ -210,28 +220,29 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 			current_chunk_offset += data_len;
 			ptr = chunk_data_end;
 			length -= data_len;
-			printf("FIRST write to rados object name %s data_len %ld chunk_size %ld chunk_offset %ld length %ld\n", client->object_name, data_len, current_chunk_size, current_chunk_offset, length);
+			//printf("FIRST write to rados object name %s data_len %ld chunk_size %ld chunk_offset %ld length %ld\n", client->object_name, data_len, current_chunk_size, current_chunk_offset, length);
 
 			free(chunk_size_str);
-			printByteArrayHex(ptr, 16);
-			printf("%.*s\n", 88, ptr);
+			//printByteArrayHex(ptr, 16);
+			//printf("%.*s\n", 88, ptr);
 		}
 		else if (current_chunk_offset < current_chunk_size) {
 			// check if this chunk is ending
 			char *chunk_data_start = ptr;
-			printByteArrayHex(chunk_data_start, 16);
+			//printByteArrayHex(chunk_data_start, 16);
 			char *chunk_data_end = NULL;
 			if (current_chunk_offset + length > current_chunk_size) {
-				printf("second chunk ending\n");
+				//printf("second chunk ending\n");
 				chunk_data_end = chunk_data_start + (current_chunk_size - current_chunk_offset);
 			}
 			else {
 				// chunk not ending yet
-				printf("second chunk not ending\n");
+				//printf("second chunk not ending\n");
 				chunk_data_end = chunk_data_start + length;
 				//chunk_data_end -= 1;
 			}
 
+			//printf("chunk_size: %ld ; ptr %s ; object size %ld object offset %ld\n", current_chunk_size, ptr, client->object_size, client->object_offset); 
 			size_t data_len = chunk_data_end - chunk_data_start;
 
 			ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
@@ -249,23 +260,25 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 			client->object_offset += data_len;
 			current_chunk_offset += data_len;
 			length -= data_len;
-			printf("SECOND write to rados object name %s data_len %ld chunk_size %ld chunk_offset %ld length %ld\n", client->object_name, data_len, current_chunk_size, current_chunk_offset, length);
-			printByteArrayHex(ptr, 16);
-			printf("%.*s\n", 88, ptr);
+			//printf("SECOND write to rados object name %s data_len %ld chunk_size %ld chunk_offset %ld length %ld\n", client->object_name, data_len, current_chunk_size, current_chunk_offset, length);
+			//printByteArrayHex(ptr, 16);
+			//printf("%.*s\n", 88, ptr);
 		}
 		if (current_chunk_offset >= current_chunk_size) {
-			printf("currentl chunk is done, reset\n");
+			//printf("currentl chunk is done, reset\n");
 			current_chunk_offset = 0;
 			current_chunk_size = 0;
 		}
-	}
 
-	client->current_chunk_size = current_chunk_size;
-	client->current_chunk_offset = current_chunk_offset;
+		client->current_chunk_size = current_chunk_size;
+		client->current_chunk_offset = current_chunk_offset;
 
-	if (client->object_offset == client->object_size) {
-		//client->parsing = false;
-		llhttp_finish(&(client->parser));
+		if (client->object_offset == client->object_size) {
+			client->parsing = false;
+			llhttp_finish(&(client->parser));
+			printf("object size now same as object offset (length of buf %ld): %s\n", length, ptr);
+			break;
+		}
 	}
 }
 
@@ -273,8 +286,6 @@ int on_body_cb(llhttp_t *parser, const char *at, size_t length)
 {
 	struct http_client *client = (struct http_client*)parser->data;
 	client->parsing = true;
-//	put_object(client, at, length);
-
 	return 0;
 }
 
@@ -344,25 +355,25 @@ int on_headers_complete_cb(llhttp_t* parser)
 				// object scope exists
 				if (num_segments > 0) {
 					object_name_len += num_segments;
-					client->object_name = malloc(sizeof(char) * (object_name_len + 1));
+					client->object_name = malloc(sizeof(char) * object_name_len);
+					//printf("object_name len %ld\n", object_name_len);
 					for (segment = client->uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
 						size_t len = segment->text.afterLast - segment->text.first;
 						strncpy(client->object_name + off, segment->text.first, len);
-						printf("len %ld off %ld seg %s\n", len, off, segment);
-						if (off > 0) {
-							client->object_name[off++] = '/';
-						}
+						//printf("len %ld off %ld seg %s\n", len, off, segment);
 						off += len;
+						*(client->object_name + off++) = '/';
+						//printf("off=%ld , object: %s\n", off, client->object_name);
 					}
-					client->object_name[object_name_len] = 0;
+					*(client->object_name + object_name_len - 1) = 0;
 				}
 			}
 		}
 	}
 
 	printf("bucket: %s object: %s\n", client->bucket_name, client->object_name);
+	if (client->method == HTTP_PUT)
 		init_object_put_request(client);
-//	}
 
 	return 0;
 }
@@ -396,6 +407,10 @@ void complete_head_request(struct http_client *client, char *datetime_str, char 
 	}
 }
 
+void complete_post_request(struct http_client *client, char *datetime_str, char *response, size_t response_buf_len)
+{
+}
+
 void complete_put_request(struct http_client *client, char *datetime_str, char *response, size_t response_buf_len)
 {
 	int ret = 0;
@@ -418,6 +433,7 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
 		rados_release_write_op(write_op);
 		snprintf(response, response_buf_len, "%s\r\nx-amz-request-id: tx000009a75d393f1564ec2-0065202454-3771-default\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str);
+		printf("REPLY: %s\n", response);
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
 		// if scopped to object, create object
@@ -437,6 +453,10 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		rados_release_write_op(write_op);
 
 		snprintf(response, response_buf_len, "%s\r\nEtag: %s\r\nx-amz-request-id: tx000009a75d393f1564ec2-0065202454-3771-default\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, datetime_str);
+//		printf("REPLY: %s\n", response);
+	}
+	else if (client->bucket_name != NULL && client->object_name != NULL) {
+		client->parsing = false;
 	}
 }
 
@@ -457,7 +477,7 @@ void complete_get_request(struct http_client *client, char *datetime_str, char *
 
 	if (client->bucket_name != NULL && client->object_name == NULL) {
 		// if GET bucket service: no objects
-		fprintf(stderr, "GET bucket: %s\n", client->bucket_name);
+		//fprintf(stderr, "GET bucket: %s\n", client->bucket_name);
 		// check if bucket exist
 		int ret; char buf;
 		ret = rados_read(client->bucket_io_ctx, client->bucket_name, &buf, 0, 0);
@@ -477,7 +497,7 @@ void complete_get_request(struct http_client *client, char *datetime_str, char *
 				xmlDocSetRootElement(doc, root_node);
 
 				for (struct UriQueryListStructA *query = queryList; query != NULL; query = query->next) {
-					fprintf(stdout, "query: (%s,%s)\n", query->key, query->value);
+					//fprintf(stdout, "query: (%s,%s)\n", query->key, query->value);
 					if (strcmp(query->key, "location") == 0) {
 						node = xmlNewChild(root_node, NULL, BAD_CAST "LocationConstraint", "default");
 						xmlNewProp(node, BAD_CAST "xmlns", BAD_CAST "http://s3.amazonaws.com/doc/2006-03-01/");
@@ -518,7 +538,7 @@ void complete_get_request(struct http_client *client, char *datetime_str, char *
 
 int on_chunk_header(llhttp_t *parser)
 {
-	printf("on chunk header\n");
+	//printf("on chunk header\n");
 	return 0;
 }
 
@@ -545,6 +565,10 @@ int on_message_complete_cb(llhttp_t* parser)
 		// if put
 		complete_put_request(client, datetime_str, response, sizeof(response));
 	}
+	else if (client->method == HTTP_POST) {
+		// if put
+		complete_post_request(client, datetime_str, response, sizeof(response));
+	}
 	else if (client->method == HTTP_GET) {
 		complete_get_request(client, datetime_str, response, sizeof(response));
 	}
@@ -553,7 +577,7 @@ int on_message_complete_cb(llhttp_t* parser)
 		snprintf(response, sizeof(response), "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str);
 	}
 
-	fprintf(stdout, "%s\n", response);
+	//fprintf(stdout, "%s\n", response);
 	send(client->fd, response, strlen(response), 0);
 	reset_http_client(client);
 
@@ -563,7 +587,7 @@ int on_message_complete_cb(llhttp_t* parser)
 int on_reset_cb(llhttp_t *parser)
 {
 	struct http_client *client = (struct http_client*)parser->data;
-	fprintf(stderr, "resetting http client for next message\n");
+	//fprintf(stderr, "resetting http client for next message\n");
 //	reset_http_client(client);
 	//sleep(1);
 	return 0;
@@ -619,8 +643,7 @@ void handle_new_connection(int epoll_fd, int server_fd)
 		return;
 	}
 
-	printf("Accepted connection from %s:%d\n",
-		   inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+	//printf("Accepted connection from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
 	// Add the new client socket to the epoll event list
 	struct epoll_event event;
@@ -653,17 +676,17 @@ void handle_client_data(int epoll_fd, int client_fd)
 		bytes_received = recv(client_fd, client_data_buffer, BUF_SIZE, 0);
 		if (bytes_received <= 0) {
 			// Client closed the connection or an error occurred
-			if (bytes_received == 0) {
-				printf("Client disconnected: %d\n", client_fd);
-			} else {
-				perror("recv");
-			}
+			//if (bytes_received == 0) {
+			//	printf("Client disconnected: %d\n", client_fd);
+			//} else {
+			//	perror("recv");
+			//}
 	
 			// Remove the client socket from the epoll event list
 			handle_client_disconnect(epoll_fd, client_fd); // Handle client disconnection
+			http_clients[client_fd] = NULL;
 			break;
 		}
-		printf("recv %ld bytes\n", bytes_received);
 		struct http_client *client = http_clients[client_fd];
 		enum llhttp_errno ret;
 
@@ -673,6 +696,7 @@ void handle_client_data(int epoll_fd, int client_fd)
 			fprintf(stderr, "Parse error: %s %s\n", llhttp_errno_name(ret), client->parser.reason);
 		}
 		if (client->parsing) {
+			printf("pass to put_object(): recv %ld bytes: %s\n", bytes_received, client_data_buffer);
 			put_object(client, client_data_buffer, bytes_received);
 		}
 	}
