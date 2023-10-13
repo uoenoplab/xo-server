@@ -39,6 +39,7 @@
 // 5.  check end of payload
 // 5.1 wait for async completion, respond http OK
 
+int object_count = 0;
 static char *HTTP_OK_HDR = (char *)"HTTP/1.1 200 OK\r\n"
 		 "Connection: keep-alive\r\n"
 		 "Server: Apache/2.2.800";
@@ -188,11 +189,11 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 			char *chunk_size_end = memmem(chunk_size_start, length, ";chunk-signature=", strlen(";chunk-signature="));
 			char *chunk_size_str = strndup(chunk_size_start, chunk_size_end - chunk_size_start);
 			current_chunk_size = strtol(chunk_size_str, NULL, 16);
-			//printf("chunk_size: %ld ; ptr %s ; object size %ld object offset %ld\n", current_chunk_size, ptr, client->object_size, client->object_offset); 
 
 			length -= chunk_size_end - chunk_size_start;
 			//char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2) + 2;
 			char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2);
+			printf("chunk_size: %ld ; ptr %.*s ; object size %ld object offset %ld\n", current_chunk_size, chunk_data_start - chunk_size_start, ptr, client->object_size, client->object_offset); 
 			if (chunk_data_start == NULL) {
 				printf("chunk start is null!!!\n");
 				exit(1);
@@ -285,7 +286,9 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 int on_body_cb(llhttp_t *parser, const char *at, size_t length)
 {
 	struct http_client *client = (struct http_client*)parser->data;
+	printf("on body, turn on parsing, at(%ld): %.40s\n", length, at);
 	client->parsing = true;
+	put_object(client, at, length);
 	return 0;
 }
 
@@ -317,11 +320,11 @@ void init_object_put_request(struct http_client *client) {
 		// non chunked transfer
 		client->object_size = client->http_payload_size;
 		client->chunked_upload = false;
-		fprintf(stderr, "non chunked upload\n");
+		//fprintf(stderr, "non chunked upload\n");
 	}
 	else {
 		client->chunked_upload = true;
-		fprintf(stderr, "chunked upload\n");
+		//fprintf(stderr, "chunked upload\n");
 	}
 
 	initRollingMD5(&(client->md5_ctx));
@@ -348,7 +351,6 @@ int on_headers_complete_cb(llhttp_t* parser)
 				UriPathSegmentA *segment;
 
 				for (segment = client->uri.pathHead->next, num_segments = 0; segment != NULL; segment = segment->next, num_segments++) {
-					printf("segment %d: %.*s\n", num_segments, segment->text.afterLast - segment->text.first, segment->text.first);
 					object_name_len += segment->text.afterLast - segment->text.first;
 				}
 
@@ -356,14 +358,11 @@ int on_headers_complete_cb(llhttp_t* parser)
 				if (num_segments > 0) {
 					object_name_len += num_segments;
 					client->object_name = malloc(sizeof(char) * object_name_len);
-					//printf("object_name len %ld\n", object_name_len);
 					for (segment = client->uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
 						size_t len = segment->text.afterLast - segment->text.first;
 						strncpy(client->object_name + off, segment->text.first, len);
-						//printf("len %ld off %ld seg %s\n", len, off, segment);
 						off += len;
 						*(client->object_name + off++) = '/';
-						//printf("off=%ld , object: %s\n", off, client->object_name);
 					}
 					*(client->object_name + object_name_len - 1) = 0;
 				}
@@ -371,7 +370,7 @@ int on_headers_complete_cb(llhttp_t* parser)
 		}
 	}
 
-	printf("bucket: %s object: %s\n", client->bucket_name, client->object_name);
+	//printf("bucket: %s object: %s\n", client->bucket_name, client->object_name);
 	if (client->method == HTTP_PUT)
 		init_object_put_request(client);
 
@@ -433,7 +432,7 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
 		rados_release_write_op(write_op);
 		snprintf(response, response_buf_len, "%s\r\nx-amz-request-id: tx000009a75d393f1564ec2-0065202454-3771-default\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str);
-		printf("REPLY: %s\n", response);
+		//printf("REPLY: %s\n", response);
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
 		// if scopped to object, create object
@@ -454,9 +453,10 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 
 		snprintf(response, response_buf_len, "%s\r\nEtag: %s\r\nx-amz-request-id: tx000009a75d393f1564ec2-0065202454-3771-default\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, datetime_str);
 //		printf("REPLY: %s\n", response);
-	}
-	else if (client->bucket_name != NULL && client->object_name != NULL) {
+
 		client->parsing = false;
+		object_count++;
+		printf("OBJECT COUNT: %d\n", object_count);
 	}
 }
 
@@ -695,10 +695,11 @@ void handle_client_data(int epoll_fd, int client_fd)
 		if (ret != HPE_OK) {
 			fprintf(stderr, "Parse error: %s %s\n", llhttp_errno_name(ret), client->parser.reason);
 		}
-		if (client->parsing) {
-			printf("pass to put_object(): recv %ld bytes: %s\n", bytes_received, client_data_buffer);
-			put_object(client, client_data_buffer, bytes_received);
-		}
+		//printf("handle_client_data: recv %ld bytes: %.50s\n", bytes_received, client_data_buffer);
+		//if (client->parsing) {
+		//	printf("pass to put_object(%ld): %.*40\n", bytes_received, client_data_buffer);
+		//	put_object(client, client_data_buffer, bytes_received);
+		//}
 	}
 }
 
