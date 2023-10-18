@@ -20,6 +20,7 @@
 #define PORT 8080
 #define MAX_EVENTS 1000
 #define MAX_FIELDS 64
+#define MAX_AIO_OP 1000
 
 #define BUCKET_POOL "bucket_pool"
 #define DATA_POOL "data_pool"
@@ -82,7 +83,9 @@ struct http_client {
 	bool chunked_upload;
 	bool parsing;
 	bool deleting;
-//	rados_completion_t aio_completion[MAX_AIO_OP];
+
+	rados_completion_t aio_completion[MAX_AIO_OP];
+	size_t num_outstanding_aio;
 
 	size_t current_chunk_size;
 	size_t current_chunk_offset;
@@ -175,6 +178,7 @@ void reset_http_client(struct http_client *client)
 	client->http_payload_size = 0;
 	client->parsing = false;
 	client->deleting = false;
+	client->num_outstanding_aio = 0;
 
 	client->current_chunk_size = 0;
 	client->current_chunk_offset = 0;
@@ -256,9 +260,7 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 			current_chunk_size = strtol(chunk_size_str, NULL, 16);
 
 			length -= chunk_size_end - chunk_size_start;
-			//char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2) + 2;
 			char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2);
-			printf("chunk_size: %ld ; ptr %.*s ; object size %ld object offset %ld\n", current_chunk_size, (int)(chunk_data_start - chunk_size_start), ptr, client->object_size, client->object_offset); 
 			if (chunk_data_start == NULL) {
 				printf("chunk start is null!!!\n");
 				break;
@@ -266,6 +268,7 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 			else {
 				chunk_data_start += 2;
 			}
+			printf("chunk_size: %ld ; ptr %.*s ; object size %ld object offset %ld\n", current_chunk_size, (int)(chunk_data_start - chunk_size_start), ptr, client->object_size, client->object_offset); 
 			char *chunk_data_end = NULL;
 			length -= chunk_data_start - chunk_size_end;
 			if (length > current_chunk_size) {
@@ -276,7 +279,9 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 			}
 			//printByteArrayHex(chunk_data_start, length - (chunk_data_start - buf));
 			size_t data_len = (char*)chunk_data_end - (char*)chunk_data_start;
-			ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
+			//ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
+			rados_aio_create_completion(NULL, NULL, NULL, &client->aio_completion[client->num_outstanding_aio]);
+			ret = rados_aio_write(client->data_io_ctx, client->object_name, client->aio_completion[client->num_outstanding_aio++], chunk_data_start, data_len, client->object_offset);
 			if (ret) {
 				fprintf(stderr, "fail to write to rados\n");
 			}
@@ -308,18 +313,21 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 			size_t data_len = chunk_data_end - chunk_data_start;
 
 			printf("(cont.) chunk_size: %ld ; ptr %.16s ; object size %ld object offset %ld\n", current_chunk_size, ptr, client->object_size, client->object_offset); 
-			ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
+			rados_aio_create_completion(NULL, NULL, NULL, &client->aio_completion[client->num_outstanding_aio]);
+			//ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
+			ret = rados_aio_write(client->data_io_ctx, client->object_name, client->aio_completion[client->num_outstanding_aio++], chunk_data_start, data_len, client->object_offset);
 			if (ret) {
 				fprintf(stderr, "fail to write to rados\n");
 			}
 			updateRollingMD5(&(client->md5_ctx), chunk_data_start, data_len);
 
-			if (current_chunk_offset + length > current_chunk_size) {
+			//if (current_chunk_offset + length > current_chunk_size) {
 				ptr = chunk_data_end + 2;
-			}
-			else {
-				ptr = chunk_data_end + 2;
-			}
+			//}
+			//else {
+			//	ptr = chunk_data_end + 2;
+			//}
+
 			client->object_offset += data_len;
 			current_chunk_offset += data_len;
 			length -= data_len;
@@ -594,6 +602,11 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		// if scopped to object, create object
 		char md5_hash[MD5_DIGEST_LENGTH * 2 + 1];
 		finalizeRollingMD5(&(client->md5_ctx), md5_hash);
+
+		for (size_t i = 0; i < client->num_outstanding_aio; i++) {
+			rados_aio_wait_for_complete(client->aio_completion[i]);
+			rados_aio_release(client->aio_completion[i]);
+		}
 
 		char metadata[4096];
 		snprintf(metadata, 4096, "%s;%s;%ld\0", datetime_str, md5_hash, client->object_size);
