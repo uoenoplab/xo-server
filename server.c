@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <time.h>
+#include <errno.h>
 
 #include <rados/librados.h>
 #include <uriparser/Uri.h>
@@ -80,11 +81,14 @@ struct http_client {
 	size_t http_payload_size;
 	bool chunked_upload;
 	bool parsing;
+	bool deleting;
 //	rados_completion_t aio_completion[MAX_AIO_OP];
 
 	size_t current_chunk_size;
 	size_t current_chunk_offset;
 	RollingMD5Context md5_ctx;
+
+	xmlParserCtxtPtr xml_ctx;
 };
 
 struct http_client *http_clients[65536] = { NULL };;
@@ -97,6 +101,61 @@ void get_datetime_str(char *buf, size_t length)
 	time_t now = time(0);
 	struct tm tm = *gmtime(&now);
 	strftime(buf, length, "%a, %d %b %Y %H:%M:%S %Z", &tm);
+}
+
+void convertToISODateTime(const char* inputDateTime, char* outputISODateTime) {
+	struct tm timeinfo;
+	memset(&timeinfo, 0, sizeof(struct tm));
+
+	// Define the format of the input date string
+	const char* inputFormat = "%a, %d %b %Y %H:%M:%S %Z";
+
+	// Parse the input date string
+	if (strptime(inputDateTime, inputFormat, &timeinfo) == NULL) {
+		fprintf(stderr, "Error parsing date string.\n");
+		return;
+	}
+
+	// Convert the parsed time to time_t
+	time_t epochTime = mktime(&timeinfo);
+
+	// Format the time in ISO format
+	strftime(outputISODateTime, 21, "%Y-%m-%dT%H:%M:%SZ", gmtime(&epochTime));
+}
+
+void unescapeHtml(char* str) {
+    char* input = str;
+    char* output = str;
+
+    while (*input) {
+        if (strncmp(input, "&amp;", 5) == 0) {
+            *output = '&';
+            input += 5;
+        } else if (strncmp(input, "&lt;", 4) == 0) {
+            *output = '<';
+            input += 4;
+        } else if (strncmp(input, "&gt;", 4) == 0) {
+            *output = '>';
+            input += 4;
+        } else if (strncmp(input, "&quot;", 6) == 0) {
+            *output = '"';
+            input += 6;
+        } else if (strncmp(input, "&apos;", 6) == 0) {
+            *output = '\'';
+            input += 6;
+        } else if (strncmp(input, "%28", 3) == 0) {
+            *output = '(';
+            input += 4;
+        } else if (strncmp(input, "%29", 3) == 0) {
+            *output = ')';
+            input += 4;
+        } else {
+            *output = *input;
+            input++;
+        }
+        output++;
+    }
+    *output = '\0'; // Null-terminate the output string.
 }
 
 void reset_http_client(struct http_client *client)
@@ -115,6 +174,7 @@ void reset_http_client(struct http_client *client)
 	client->object_offset = 0;
 	client->http_payload_size = 0;
 	client->parsing = false;
+	client->deleting = false;
 
 	client->current_chunk_size = 0;
 	client->current_chunk_offset = 0;
@@ -168,10 +228,15 @@ void printByteArrayHex(const unsigned char *byteArray, size_t length) {
     printf("\n");
 }
 
+void delete_objects(struct http_client *client, const char *buf, size_t length)
+{
+	xmlParseChunk(client->xml_ctx, buf, length, 0);
+}
+
 void put_object(struct http_client *client, const char *buf, size_t length)
 {
 	int ret;
-	char *ptr = buf;
+	char *ptr = (char*)buf;
 
 	//printf("put_object: %s , length=%ld\n", buf, length);
 	size_t current_chunk_size = client->current_chunk_size;
@@ -193,10 +258,10 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 			length -= chunk_size_end - chunk_size_start;
 			//char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2) + 2;
 			char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2);
-			printf("chunk_size: %ld ; ptr %.*s ; object size %ld object offset %ld\n", current_chunk_size, chunk_data_start - chunk_size_start, ptr, client->object_size, client->object_offset); 
+			printf("chunk_size: %ld ; ptr %.*s ; object size %ld object offset %ld\n", current_chunk_size, (int)(chunk_data_start - chunk_size_start), ptr, client->object_size, client->object_offset); 
 			if (chunk_data_start == NULL) {
 				printf("chunk start is null!!!\n");
-				exit(1);
+				break;
 			}
 			else {
 				chunk_data_start += 2;
@@ -221,11 +286,8 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 			current_chunk_offset += data_len;
 			ptr = chunk_data_end;
 			length -= data_len;
-			//printf("FIRST write to rados object name %s data_len %ld chunk_size %ld chunk_offset %ld length %ld\n", client->object_name, data_len, current_chunk_size, current_chunk_offset, length);
 
 			free(chunk_size_str);
-			//printByteArrayHex(ptr, 16);
-			//printf("%.*s\n", 88, ptr);
 		}
 		else if (current_chunk_offset < current_chunk_size) {
 			// check if this chunk is ending
@@ -243,9 +305,9 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 				//chunk_data_end -= 1;
 			}
 
-			//printf("chunk_size: %ld ; ptr %s ; object size %ld object offset %ld\n", current_chunk_size, ptr, client->object_size, client->object_offset); 
 			size_t data_len = chunk_data_end - chunk_data_start;
 
+			printf("(cont.) chunk_size: %ld ; ptr %.16s ; object size %ld object offset %ld\n", current_chunk_size, ptr, client->object_size, client->object_offset); 
 			ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
 			if (ret) {
 				fprintf(stderr, "fail to write to rados\n");
@@ -275,8 +337,8 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 		client->current_chunk_offset = current_chunk_offset;
 
 		if (client->object_offset == client->object_size) {
-			client->parsing = false;
-			llhttp_finish(&(client->parser));
+			//client->parsing = false;
+			//llhttp_finish(&(client->parser));
 			printf("object size now same as object offset (length of buf %ld): %s\n", length, ptr);
 			break;
 		}
@@ -286,9 +348,16 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 int on_body_cb(llhttp_t *parser, const char *at, size_t length)
 {
 	struct http_client *client = (struct http_client*)parser->data;
-	printf("on body, turn on parsing, at(%ld): %.40s\n", length, at);
-	client->parsing = true;
-	put_object(client, at, length);
+	if (client->method == HTTP_PUT) {
+		printf("on body, turn on parsing, at(%ld): %.88s\n", length, at);
+		//client->parsing = true;
+		put_object(client, at, length);
+	}
+	else if (client->method == HTTP_POST) {
+		if (client->deleting == true)
+			delete_objects(client, at, length);
+
+	}
 	return 0;
 }
 
@@ -330,6 +399,11 @@ void init_object_put_request(struct http_client *client) {
 	initRollingMD5(&(client->md5_ctx));
 }
 
+void init_objects_delete_request(struct http_client *client) {
+	client->xml_ctx = xmlCreatePushParserCtxt(NULL, NULL, NULL, 0, NULL);
+	client->deleting = true;
+}
+
 int on_headers_complete_cb(llhttp_t* parser)
 {
 	struct http_client *client = (struct http_client*)parser->data;
@@ -338,10 +412,12 @@ int on_headers_complete_cb(llhttp_t* parser)
 	client->bucket_name = NULL;
 	client->object_name = NULL;
 
+	// process URI
 	if (client->uri.pathHead != NULL) {
 		size_t bucket_name_len = client->uri.pathHead->text.afterLast - client->uri.pathHead->text.first;
 		if (bucket_name_len > 0) {
 			client->bucket_name = strndup(client->uri.pathHead->text.first, bucket_name_len);
+			unescapeHtml(client->bucket_name);
 
 			if (client->uri.pathHead->next != NULL && client->uri.pathHead->next->text.afterLast - client->uri.pathHead->next->text.first > 0) {
 				// calculate total length
@@ -365,14 +441,32 @@ int on_headers_complete_cb(llhttp_t* parser)
 						*(client->object_name + off++) = '/';
 					}
 					*(client->object_name + object_name_len - 1) = 0;
+					unescapeHtml(client->object_name);
 				}
 			}
 		}
 	}
 
-	//printf("bucket: %s object: %s\n", client->bucket_name, client->object_name);
-	if (client->method == HTTP_PUT)
+	if (client->method == HTTP_PUT) {
 		init_object_put_request(client);
+	}
+	else if (client->method == HTTP_POST) {
+		int ret = 0;
+		UriQueryListA *queryList;
+		int itemCount;
+
+		if (uriDissectQueryMallocA(&queryList, &itemCount, client->uri.query.first, client->uri.query.afterLast) == URI_SUCCESS) {
+			// go through list of queries
+			for (struct UriQueryListStructA *query = queryList; query != NULL; query = query->next) {
+				// DeleteObjects
+				if (strcmp(query->key, "delete") == 0 && client->bucket_name != NULL) {
+					printf("HTTP POST!!!!!!!!!\n");
+					init_objects_delete_request(client);
+				}
+			}
+		}
+		uriFreeQueryListA(queryList);
+	}
 
 	return 0;
 }
@@ -408,6 +502,68 @@ void complete_head_request(struct http_client *client, char *datetime_str, char 
 
 void complete_post_request(struct http_client *client, char *datetime_str, char *response, size_t response_buf_len)
 {
+	xmlDocPtr doc = NULL;
+	xmlDocPtr response_doc = NULL;
+	xmlChar *xmlbuf;
+	int xmlbuf_size;
+
+	if (client->deleting) {
+		doc = client->xml_ctx->myDoc;
+		response_doc = xmlNewDoc(BAD_CAST "1.0");
+		xmlNodePtr response_node;
+
+		xmlNodePtr response_root_node = xmlNewNode(NULL, BAD_CAST "DeleteResult");
+		xmlNewProp(response_root_node, BAD_CAST "xmlns", BAD_CAST "http://s3.amazonaws.com/doc/2006-03-01/");
+		xmlDocSetRootElement(response_doc, response_root_node);
+
+
+		xmlNodePtr root = xmlDocGetRootElement(doc);
+		xmlNodePtr node = root->children;
+		xmlNodePtr ptr;
+
+		size_t num_objects = 1000; xmlChildElementCount(node);
+		size_t i;
+
+		rados_write_op_t write_op = rados_create_write_op();
+		char *keys[num_objects];
+		size_t keys_len[num_objects];
+
+		for (ptr = node, i = 0; ptr != NULL; ptr = ptr->next, i++) {
+			if (strcmp(ptr->name, "Object") == 0) {
+				xmlNodePtr key_node = ptr->children;
+				xmlChar* content = xmlNodeListGetString(doc, key_node->children, 1);
+
+				int ret = rados_remove(client->data_io_ctx, content);
+				if (ret) perror("rados_remove");
+
+				keys[i] = strndup(content, strlen(content));
+				keys_len[i] = strlen(content);
+				printf("object %d/%d\n", i, num_objects);
+				printf("deleting %s %ld\n", keys[i], keys_len[i]);
+
+				response_node = xmlNewChild(response_root_node, NULL, BAD_CAST "Deleted", NULL);
+				response_node = xmlNewChild(response_node, NULL, BAD_CAST "Key", content);
+
+				free(content);
+			}
+		}
+
+		rados_write_op_omap_rm_keys(write_op, keys, i);
+		rados_write_op_operate(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
+
+		// dump XML document
+		xmlDocDumpMemoryEnc(response_doc, &xmlbuf, &xmlbuf_size, "UTF-8");
+		snprintf(response, response_buf_len, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n%s", HTTP_OK_HDR, xmlbuf_size, datetime_str, (char*)xmlbuf);
+
+		xmlFreeParserCtxt(client->xml_ctx);
+//		xmlCleanupParser();
+
+//		xmlFreeDoc(doc);
+		xmlFreeDoc(response_doc);
+
+//		xmlFree(xmlbuf);
+		client->deleting = false;
+	}
 }
 
 void complete_put_request(struct http_client *client, char *datetime_str, char *response, size_t response_buf_len)
@@ -440,7 +596,7 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		finalizeRollingMD5(&(client->md5_ctx), md5_hash);
 
 		char metadata[4096];
-		snprintf(metadata, 4096, "%s;%s", datetime_str, md5_hash);
+		snprintf(metadata, 4096, "%s;%s;%ld\0", datetime_str, md5_hash, client->object_size);
 		const size_t key_lens = strlen(client->object_name);
 		const size_t val_lens = strlen(metadata);
 		const char *keys = client->object_name;
@@ -454,7 +610,7 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		snprintf(response, response_buf_len, "%s\r\nEtag: %s\r\nx-amz-request-id: tx000009a75d393f1564ec2-0065202454-3771-default\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, datetime_str);
 //		printf("REPLY: %s\n", response);
 
-		client->parsing = false;
+		//client->parsing = false;
 		object_count++;
 		printf("OBJECT COUNT: %d\n", object_count);
 	}
@@ -490,34 +646,107 @@ void complete_get_request(struct http_client *client, char *datetime_str, char *
 			if (uriDissectQueryMallocA(&queryList, &itemCount, client->uri.query.first, client->uri.query.afterLast) == URI_SUCCESS) {
 				// go through list of queries
 				bool fetch_owner = false;
+				char *prefix = NULL;
+				char *encoding_type = NULL;
 				int list_type = 1;
+				bool versioning = false;
+				bool location = false;
 
 				doc = xmlNewDoc(BAD_CAST "1.0");
-				root_node = xmlNewNode(NULL, BAD_CAST "root");
-				xmlDocSetRootElement(doc, root_node);
 
 				for (struct UriQueryListStructA *query = queryList; query != NULL; query = query->next) {
 					//fprintf(stdout, "query: (%s,%s)\n", query->key, query->value);
 					if (strcmp(query->key, "location") == 0) {
-						node = xmlNewChild(root_node, NULL, BAD_CAST "LocationConstraint", "default");
-						xmlNewProp(node, BAD_CAST "xmlns", BAD_CAST "http://s3.amazonaws.com/doc/2006-03-01/");
+						location = true;
 					}
 					if (strcmp(query->key, "versioning") == 0){
-						node = xmlNewChild(root_node, NULL, BAD_CAST "VersioningConfiguration", NULL);
-						xmlNewProp(node, BAD_CAST "xmlns", BAD_CAST "http://s3.amazonaws.com/doc/2006-03-01/");
+						versioning = true;
 					}
 					if (strcmp(query->key, "fetch-owner") == 0) {
 						if (strcmp(query->value, "true") == 0)
 							fetch_owner = true;
 					}
-					if (strcmp(query->key, "list_type") == 0) {
+					if (strcmp(query->key, "list-type") == 0) {
 						if (strcmp(query->value, "2") == 0)
 							list_type = 2;
+					}
+					if (strcmp(query->key, "prefix") == 0) {
+						prefix = strdup(query->value);
+					}
+					if (strcmp(query->key, "encoding-type") == 0) {
+						encoding_type = strdup(query->value);
 					}
 				}
 
 				// return list inside bucket
 				if (fetch_owner && list_type == 2) {
+					rados_omap_iter_t iter;
+					unsigned char pmore; int prval;
+					rados_read_op_t read_op = rados_create_read_op();
+
+					rados_read_op_omap_get_vals2(read_op, prefix, "", 1000, &iter, &pmore, &prval);
+					rados_read_op_operate(read_op, client->bucket_io_ctx, client->bucket_name, 0);
+
+					root_node = xmlNewNode(NULL, BAD_CAST "ListBucketResult");
+					xmlNewProp(root_node, BAD_CAST "xmlns", BAD_CAST "http://s3.amazonaws.com/doc/2006-03-01/");
+					xmlDocSetRootElement(doc, root_node);
+
+					node = xmlNewChild(root_node, NULL, BAD_CAST "EncodingType", "url");
+					node = xmlNewChild(root_node, NULL, BAD_CAST "Name", client->bucket_name);
+					if (prefix)
+						node = xmlNewChild(root_node, NULL, BAD_CAST "Prefix", prefix);
+					if (encoding_type)
+						node = xmlNewChild(root_node, NULL, BAD_CAST "EncodingType", encoding_type);
+					node = xmlNewChild(root_node, NULL, BAD_CAST "MaxKeys", "1000");
+					if (pmore)
+						node = xmlNewChild(root_node, NULL, BAD_CAST "IsTruncated", "true");
+					else
+						node = xmlNewChild(root_node, NULL, BAD_CAST "IsTruncated", "false");
+
+					// for loop
+					char *object_name, *metadata;
+					size_t object_name_len, metadata_len;
+					while(rados_omap_get_next2(iter, &object_name, &metadata, &object_name_len, &metadata_len) == 0 && \
+							(object_name != NULL && metadata != NULL && object_name_len != 0 && metadata_len != 0)) {
+						char last_modified_datetime_str[4096];
+						metadata[metadata_len] = 0;
+						char *data = strdup(metadata);
+
+						xmlNodePtr content_node = xmlNewChild(root_node, NULL, BAD_CAST "Contents", NULL);
+						node = xmlNewChild(content_node, NULL, BAD_CAST "Key", object_name);
+
+						char *token = strtok(data, ";");
+						convertToISODateTime(token, last_modified_datetime_str);
+						node = xmlNewChild(content_node, NULL, BAD_CAST "LastModified", last_modified_datetime_str);
+						token = strtok(NULL, ";");
+						node = xmlNewChild(content_node, NULL, BAD_CAST "Etag", token);
+						token = strtok(NULL, ";");
+						node = xmlNewChild(content_node, NULL, BAD_CAST "Size", token);
+						node = xmlNewChild(content_node, NULL, BAD_CAST "StorageClass", "STANDARD");
+
+						xmlNodePtr owner_node = xmlNewChild(content_node, NULL, BAD_CAST "Owner", NULL);
+						node = xmlNewChild(owner_node, NULL, BAD_CAST "ID", "admin");
+						node = xmlNewChild(owner_node, NULL, BAD_CAST "DisplayName", "admin");
+						node = xmlNewChild(content_node, NULL, BAD_CAST "Type", "Nomal");
+
+						//free(data); free(size); free(md5_hash); free(last_modified_datetime_str);
+						free(data);
+					}
+
+					rados_release_write_op(read_op);
+				}
+				else {
+					root_node = xmlNewNode(NULL, BAD_CAST "root");
+					xmlDocSetRootElement(doc, root_node);
+
+					if (location) {
+						node = xmlNewChild(root_node, NULL, BAD_CAST "LocationConstraint", "default");
+						xmlNewProp(node, BAD_CAST "xmlns", BAD_CAST "http://s3.amazonaws.com/doc/2006-03-01/");
+					}
+					if (versioning) {
+						node = xmlNewChild(root_node, NULL, BAD_CAST "VersioningConfiguration", NULL);
+						xmlNewProp(node, BAD_CAST "xmlns", BAD_CAST "http://s3.amazonaws.com/doc/2006-03-01/");
+					}
 				}
 
 				// dump XML document
@@ -528,7 +757,10 @@ void complete_get_request(struct http_client *client, char *datetime_str, char *
 				xmlFree(xmlbuf);
 				xmlFreeDoc(doc);
 				xmlCleanupParser();
+				if (prefix) free(prefix);
+				if (encoding_type) free(encoding_type);
 			}
+			uriFreeQueryListA(queryList);
 		}
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
@@ -547,8 +779,8 @@ int on_message_complete_cb(llhttp_t* parser)
 	int ret = 0;
 	char datetime_str[64];
 
-	char response[65536];
-	char response_payload[65536];
+	size_t response_size = sizeof(char) * 65536 * 10;
+	char *response = malloc(response_size);
 
 	struct http_client *client = (struct http_client*)parser->data;
 	get_datetime_str(datetime_str, 64);
@@ -559,27 +791,28 @@ int on_message_complete_cb(llhttp_t* parser)
 	}
 	else if (client->method == HTTP_HEAD) {
 		// if head
-		complete_head_request(client, datetime_str, response, sizeof(response));
+		complete_head_request(client, datetime_str, response, response_size);
 	}
 	else if (client->method == HTTP_PUT) {
 		// if put
-		complete_put_request(client, datetime_str, response, sizeof(response));
+		complete_put_request(client, datetime_str, response, response_size);
 	}
 	else if (client->method == HTTP_POST) {
-		// if put
-		complete_post_request(client, datetime_str, response, sizeof(response));
+		// if post
+		complete_post_request(client, datetime_str, response, response_size);
 	}
 	else if (client->method == HTTP_GET) {
-		complete_get_request(client, datetime_str, response, sizeof(response));
+		complete_get_request(client, datetime_str, response, response_size);
 	}
 	else {
 		// DEBUG
 		snprintf(response, sizeof(response), "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str);
 	}
 
-	//fprintf(stdout, "%s\n", response);
+	fprintf(stdout, "%.65536s\nresponse len: %ld\n", response, strlen(response));
 	send(client->fd, response, strlen(response), 0);
 	reset_http_client(client);
+	free(response);
 
 	return 0;
 }
@@ -637,6 +870,7 @@ void handle_new_connection(int epoll_fd, int server_fd)
 	socklen_t client_len = sizeof(client_addr);
 
 	// Accept a new client connection
+	//new_socket = accept4(server_fd, (struct sockaddr *)&client_addr, &client_len, SOCK_NONBLOCK | SOCK_CLOEXEC);
 	new_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
 	if (new_socket == -1) {
 		perror("accept");
@@ -647,7 +881,8 @@ void handle_new_connection(int epoll_fd, int server_fd)
 
 	// Add the new client socket to the epoll event list
 	struct epoll_event event;
-	event.events = EPOLLIN | EPOLLET; // Edge-triggered mode
+	//event.events = EPOLLIN | EPOLLET; // Edge-triggered mode
+	event.events = EPOLLIN; // Edge-triggered mode
 	event.data.fd = new_socket;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &event) == -1) {
 		perror("epoll_ctl");
@@ -671,22 +906,24 @@ void handle_client_data(int epoll_fd, int client_fd)
 {
 	ssize_t bytes_received;
 
-	while (1) {
+	//while (1) {
 		memset(client_data_buffer, 0, BUF_SIZE);
 		bytes_received = recv(client_fd, client_data_buffer, BUF_SIZE, 0);
 		if (bytes_received <= 0) {
 			// Client closed the connection or an error occurred
-			//if (bytes_received == 0) {
-			//	printf("Client disconnected: %d\n", client_fd);
-			//} else {
-			//	perror("recv");
-			//}
+			if (bytes_received == 0) {
+				printf("Client disconnected: %d\n", client_fd);
+			} else {
+				perror("recv");
+			}
 	
 			// Remove the client socket from the epoll event list
 			handle_client_disconnect(epoll_fd, client_fd); // Handle client disconnection
 			http_clients[client_fd] = NULL;
-			break;
+			//break;
+			return;
 		}
+
 		struct http_client *client = http_clients[client_fd];
 		enum llhttp_errno ret;
 
@@ -700,7 +937,7 @@ void handle_client_data(int epoll_fd, int client_fd)
 		//	printf("pass to put_object(%ld): %.*40\n", bytes_received, client_data_buffer);
 		//	put_object(client, client_data_buffer, bytes_received);
 		//}
-	}
+	//}
 }
 
 int main(int argc, char *argv[])
