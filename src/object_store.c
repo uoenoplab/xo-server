@@ -54,116 +54,7 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 		client->current_chunk_size += length;
 	}
 	else {
-		//printf("calling put object length %ld current_chunk_size %ld current_chunk_offset %ld\n", length, current_chunk_size, current_chunk_offset);
-	
-		while (length > 0) {
-			//printf("beginning of loop: current_chunk_size=%ld current_chunk_offset=%ld\n", current_chunk_size, current_chunk_offset);
-			// 1. we are starting a chunk
-			// 2. we are in a middle of a chunk
-			// 3. we are working towards the end of a chunk
-			if (current_chunk_size == 0 && current_chunk_offset == 0) {
-				char *chunk_size_start = ptr;
-				//printByteArrayHex(chunk_size_start, 16);
-				char *chunk_size_end = memmem(chunk_size_start, length, ";chunk-signature=", strlen(";chunk-signature="));
-				char *chunk_size_str = strndup(chunk_size_start, chunk_size_end - chunk_size_start);
-				current_chunk_size = strtol(chunk_size_str, NULL, 16);
-	
-				length -= chunk_size_end - chunk_size_start;
-				char *chunk_data_start = memmem(chunk_size_end, length, "\r\n", 2);
-				if (chunk_data_start == NULL) {
-					//printf("chunk start is null!!!\n");
-					break;
-				}
-				else {
-					chunk_data_start += 2;
-				}
-				//printf("chunk_size: %ld ; ptr %.*s ; object size %ld object offset %ld\n", current_chunk_size, (int)(chunk_data_start - chunk_size_start), ptr, client->object_size, client->object_offset); 
-				char *chunk_data_end = NULL;
-				length -= chunk_data_start - chunk_size_end;
-				if (length > current_chunk_size) {
-					chunk_data_end = chunk_data_start + current_chunk_size;
-				}
-				else {
-					chunk_data_end = chunk_data_start + length;
-				}
-				//printByteArrayHex(chunk_data_start, length - (chunk_data_start - buf));
-				size_t data_len = (char*)chunk_data_end - (char*)chunk_data_start;
-				ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
-				assert(ret == 0);
-				//rados_aio_create_completion(NULL, NULL, NULL, &client->aio_completion[client->num_outstanding_aio]);
-				//ret = rados_aio_write(client->data_io_ctx, client->object_name, client->aio_completion[client->num_outstanding_aio++], chunk_data_start, data_len, client->object_offset);
-				if (ret) {
-					perror("rados_write");
-					exit(1);
-				}
-				updateRollingMD5(&(client->md5_ctx), chunk_data_start, data_len);
-	
-				client->object_offset += data_len;
-				current_chunk_offset += data_len;
-				ptr = chunk_data_end;
-				length -= data_len;
-	
-				free(chunk_size_str);
-			}
-			else if (current_chunk_offset < current_chunk_size) {
-				// check if this chunk is ending
-				char *chunk_data_start = ptr;
-				//printByteArrayHex(chunk_data_start, 16);
-				char *chunk_data_end = NULL;
-				if (current_chunk_offset + length > current_chunk_size) {
-					//printf("second chunk ending\n");
-					chunk_data_end = chunk_data_start + (current_chunk_size - current_chunk_offset);
-				}
-				else {
-					// chunk not ending yet
-					//printf("second chunk not ending\n");
-					chunk_data_end = chunk_data_start + length;
-					//chunk_data_end -= 1;
-				}
-	
-				size_t data_len = chunk_data_end - chunk_data_start;
-	
-				//printf("(cont.) chunk_size: %ld ; ptr %.16s ; object size %ld object offset %ld\n", current_chunk_size, ptr, client->object_size, client->object_offset); 
-				ret = rados_write(client->data_io_ctx, client->object_name, chunk_data_start, data_len, client->object_offset);
-				assert(ret == 0);
-				//rados_aio_create_completion(NULL, NULL, NULL, &client->aio_completion[client->num_outstanding_aio]);
-				//ret = rados_aio_write(client->data_io_ctx, client->object_name, client->aio_completion[client->num_outstanding_aio++], chunk_data_start, data_len, client->object_offset);
-				if (ret) {
-					perror("rados_write");
-					exit(1);
-				}
-				updateRollingMD5(&(client->md5_ctx), chunk_data_start, data_len);
-	
-				if (current_chunk_offset + length > current_chunk_size) {
-					ptr = chunk_data_end + 2;
-				}
-				else {
-					ptr = chunk_data_end;
-				}
-	
-				client->object_offset += data_len;
-				current_chunk_offset += data_len;
-				length -= data_len;
-				//printf("SECOND write to rados object name %s data_len %ld chunk_size %ld chunk_offset %ld length %ld\n", client->object_name, data_len, current_chunk_size, current_chunk_offset, length);
-				//printByteArrayHex(ptr, 16);
-				//printf("%.*s\n", 88, ptr);
-			}
-			if (current_chunk_offset >= current_chunk_size) {
-				//printf("currentl chunk is done, reset\n");
-				current_chunk_offset = 0;
-				current_chunk_size = 0;
-			}
-	
-			client->current_chunk_size = current_chunk_size;
-			client->current_chunk_offset = current_chunk_offset;
-	
-			if (client->object_offset == client->object_size) {
-				//client->parsing = false;
-				//llhttp_finish(&(client->parser));
-				//printf("object size now same as object offset (length of buf %ld): %s\n", length, ptr);
-				break;
-			}
-		}
+		printf("Chunked upload not supported\n");
 	}
 }
 
@@ -185,7 +76,7 @@ void init_object_put_request(struct http_client *client) {
 	}
 	else {
 		client->chunked_upload = true;
-		//fprintf(stderr, "chunked upload\n");
+		fprintf(stderr, "chunked upload not supported\n");
 	}
 
 	if (client->object_name != NULL) {
@@ -197,76 +88,6 @@ void init_object_put_request(struct http_client *client) {
 void init_objects_delete_request(struct http_client *client) {
 	client->xml_ctx = xmlCreatePushParserCtxt(NULL, NULL, NULL, 0, NULL);
 	client->deleting = true;
-}
-
-int on_headers_complete_cb(llhttp_t* parser)
-{
-	struct http_client *client = (struct http_client*)parser->data;
-
-	client->method = llhttp_get_method(parser);
-
-	// process URI
-	if (client->uri.pathHead != NULL) {
-		size_t bucket_name_len = client->uri.pathHead->text.afterLast - client->uri.pathHead->text.first;
-		if (bucket_name_len > 0) {
-			if (client->bucket_name) { free(client->bucket_name); client->bucket_name = NULL; }
-			client->bucket_name = strndup(client->uri.pathHead->text.first, bucket_name_len);
-			unescapeHtml(client->bucket_name);
-
-			if (client->uri.pathHead->next != NULL && client->uri.pathHead->next->text.afterLast - client->uri.pathHead->next->text.first > 0) {
-				// calculate total length
-				size_t object_name_len = 0;
-				size_t num_segments = 0;
-				size_t off = 0;
-				UriPathSegmentA *segment;
-
-				for (segment = client->uri.pathHead->next, num_segments = 0; segment != NULL; segment = segment->next, num_segments++) {
-					object_name_len += segment->text.afterLast - segment->text.first;
-				}
-
-				// object scope exists
-				if (num_segments > 0) {
-					object_name_len += num_segments;
-					if (client->object_name) { free(client->object_name); client->object_name = NULL; }
-					client->object_name = malloc(sizeof(char) * object_name_len);
-					for (segment = client->uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
-						size_t len = segment->text.afterLast - segment->text.first;
-						strncpy(client->object_name + off, segment->text.first, len);
-						off += len;
-						*(client->object_name + off++) = '/';
-					}
-					*(client->object_name + object_name_len - 1) = 0;
-					unescapeHtml(client->object_name);
-				}
-			}
-		}
-	}
-
-	if (client->method == HTTP_PUT) {
-		init_object_put_request(client);
-	}
-	else if (client->method == HTTP_POST) {
-		UriQueryListA *queryList;
-		int itemCount;
-
-		if (uriDissectQueryMallocA(&queryList, &itemCount, client->uri.query.first, client->uri.query.afterLast) == URI_SUCCESS) {
-			// go through list of queries
-			for (struct UriQueryListStructA *query = queryList; query != NULL; query = query->next) {
-				// DeleteObjects
-				if (strcasecmp(query->key, "delete") == 0 && client->bucket_name != NULL) {
-					init_objects_delete_request(client);
-				}
-			}
-			uriFreeQueryListA(queryList);
-		}
-	}
-
-	if (client->expect == CONTINUE) {
-		// if expects continue
-		send(client->fd, HTTP_CONTINUE_HDR, strlen(HTTP_CONTINUE_HDR), 0);
-	}
-
-	return 0;
 }
 
 void complete_head_request(struct http_client *client, char *datetime_str, char **response, size_t *response_size)

@@ -223,3 +223,75 @@ struct http_client *create_http_client(int fd)
 
 	return client;
 }
+
+int on_headers_complete_cb(llhttp_t* parser)
+{
+	struct http_client *client = (struct http_client*)parser->data;
+
+	client->method = llhttp_get_method(parser);
+
+	// process URI
+	if (client->uri.pathHead != NULL) {
+		size_t bucket_name_len = client->uri.pathHead->text.afterLast - client->uri.pathHead->text.first;
+		if (bucket_name_len > 0) {
+			if (client->bucket_name) { free(client->bucket_name); client->bucket_name = NULL; }
+			client->bucket_name = strndup(client->uri.pathHead->text.first, bucket_name_len);
+			unescapeHtml(client->bucket_name);
+
+			if (client->uri.pathHead->next != NULL && client->uri.pathHead->next->text.afterLast - client->uri.pathHead->next->text.first > 0) {
+				// calculate total length
+				size_t object_name_len = 0;
+				size_t num_segments = 0;
+				size_t off = 0;
+				UriPathSegmentA *segment;
+
+				for (segment = client->uri.pathHead->next, num_segments = 0; segment != NULL; segment = segment->next, num_segments++) {
+					object_name_len += segment->text.afterLast - segment->text.first;
+				}
+
+				// object scope exists
+				if (num_segments > 0) {
+					object_name_len += num_segments;
+					if (client->object_name) { free(client->object_name); client->object_name = NULL; }
+					client->object_name = malloc(sizeof(char) * object_name_len);
+					for (segment = client->uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
+						size_t len = segment->text.afterLast - segment->text.first;
+						strncpy(client->object_name + off, segment->text.first, len);
+						off += len;
+						*(client->object_name + off++) = '/';
+					}
+					*(client->object_name + object_name_len - 1) = 0;
+					unescapeHtml(client->object_name);
+				}
+			}
+		}
+	}
+
+	if (client->method == HTTP_PUT) {
+		init_object_put_request(client);
+	}
+	else if (client->method == HTTP_POST) {
+		UriQueryListA *queryList;
+		int itemCount;
+
+		if (uriDissectQueryMallocA(&queryList, &itemCount, client->uri.query.first, client->uri.query.afterLast) == URI_SUCCESS) {
+			// go through list of queries
+			for (struct UriQueryListStructA *query = queryList; query != NULL; query = query->next) {
+				// DeleteObjects
+				if (strcasecmp(query->key, "delete") == 0 && client->bucket_name != NULL) {
+					init_objects_delete_request(client);
+				}
+			}
+			uriFreeQueryListA(queryList);
+		}
+	}
+
+	if (client->expect == CONTINUE) {
+		// if expects continue
+		send(client->fd, HTTP_CONTINUE_HDR, strlen(HTTP_CONTINUE_HDR), 0);
+	}
+
+	return 0;
+}
+
+
