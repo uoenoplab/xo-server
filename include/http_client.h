@@ -7,20 +7,32 @@
 #include <libxml/tree.h>
 #include <llhttp.h>
 
-#include "util.h"
 #include "md5.h"
+#include "util.h"
 
 #define MAX_AIO_OP 65536
 #define MAX_FIELDS 64
 #define MAX_HTTP_CLIENTS 65536
 
 #define BUCKET_POOL "bucket_pool"
-#define DATA_POOL "1mb_data_pool"
+#define DATA_POOL "data_pool"
 
 enum http_expect { CONTINUE, NONE };
 
 extern size_t BUF_SIZE;
 extern char *random_buffer;
+
+static char *HTTP_OK_HDR = (char *)"HTTP/1.1 200 OK\r\n"
+		 "Connection: keep-alive\r\n"
+		 "Server: Apache/2.2.800";
+
+static char *HTTP_NOT_FOUND_HDR = (char *)"HTTP/1.1 404 NOT FOUND\r\n"
+		 "Connection: keep-alive\r\n"
+		 "Server: Apache/2.2.800";
+
+static char *HTTP_CONTINUE_HDR = (char *)"HTTP/1.1 100 CONTINUE\r\n\r\n";
+
+static char *AMZ_REQUEST_ID = (char*)"tx000009a75d393f1564ec2-0065202454-3771-default";
 
 struct http_client {
 	int fd;
@@ -41,8 +53,8 @@ struct http_client {
 	char *header_values[MAX_FIELDS];
 	size_t num_fields;
 
-	rados_ioctx_t bucket_io_ctx;
-//	rados_ioctx_t data_io_ctx;
+	rados_ioctx_t *bucket_io_ctx;
+	rados_ioctx_t *data_io_ctx;
 
 	size_t object_size;
 	size_t object_offset;
@@ -65,27 +77,21 @@ struct http_client {
 extern __thread struct http_client *http_clients[MAX_HTTP_CLIENTS];
 
 extern rados_t cluster;
-extern rados_ioctx_t bucket_io_ctx;
-extern rados_ioctx_t data_io_ctx;
+extern __thread rados_ioctx_t bucket_io_ctx;
+extern __thread rados_ioctx_t data_io_ctx;
 
 struct http_client *create_http_client(int fd);
 void reset_http_client(struct http_client *client);
 void free_http_client(struct http_client *client);
+
 int on_header_field_cb(llhttp_t *parser, const char *at, size_t length);
 int on_header_value_cb(llhttp_t *parser, const char *at, size_t length);
-void delete_objects(struct http_client *client, const char *buf, size_t length);
-void put_object(struct http_client *client, const char *buf, size_t length);
 int on_body_cb(llhttp_t *parser, const char *at, size_t length);
 int on_url_cb(llhttp_t *parser, const char *at, size_t length);
+
+int on_headers_complete_cb(llhttp_t* parser);
 int on_chunk_header(llhttp_t *parser);
 int on_message_complete_cb(llhttp_t* parser);
 int on_reset_cb(llhttp_t *parser);
-
-void init_object_put_request(struct http_client *client);
-void complete_head_request(struct http_client *client, char *datetime_str, char **response, size_t *response_size);
-void complete_post_request(struct http_client *client, char *datetime_str, char **response, size_t *response_size, char **data_payload, size_t *data_payload_size);
-void complete_delete_request(struct http_client *client, char *datetime_str, char **response, size_t *response_size, char **data_payload, size_t *data_payload_size);
-void complete_put_request(struct http_client *client, char *datetime_str, char **response, size_t *response_size);
-void complete_get_request(struct http_client *client, char *datetime_str, char **response, size_t *response_size, char **data_payload, size_t *data_payload_size);
 
 #endif

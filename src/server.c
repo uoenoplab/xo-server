@@ -41,7 +41,7 @@ struct thread_param {
 };
 
 void handleCtrlC(int signum) {
-	printf("Received Ctrl+C. Stopping the server...\n");
+//	printf("Received Ctrl+C. Stopping the server thread [%d]...\n", gettid());
 	server_running = 0; // Set the flag to stop the server gracefully.
 }
 
@@ -126,6 +126,20 @@ void *conn_wait(void *arg)
 	int epoll_fd, event_count;
 	struct epoll_event event, events[MAX_EVENTS];
 
+	int err = rados_ioctx_create(cluster, BUCKET_POOL, &bucket_io_ctx);
+	if (err < 0) {
+		fprintf(stderr, "cannot open rados pool %s: %s\n", BUCKET_POOL, strerror(-err));
+		rados_shutdown(cluster);
+		exit(1);
+	}
+
+	err = rados_ioctx_create(cluster, DATA_POOL, &data_io_ctx);
+	if (err < 0) {
+		fprintf(stderr, "cannot open rados pool %s: %s\n", DATA_POOL, strerror(-err));
+		rados_shutdown(cluster);
+		exit(1);
+	}
+
 	// Create an epoll instance
 	if ((epoll_fd = epoll_create1(0)) == -1) {
 		perror("epoll_create1");
@@ -142,7 +156,7 @@ void *conn_wait(void *arg)
 
 	while (server_running) {
 		// Wait for events using epoll
-		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, 1);
+		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 		if (event_count == -1) {
 			if (errno == EINTR || errno == EINTR) {
 				continue;
@@ -166,6 +180,9 @@ void *conn_wait(void *arg)
 	free(client_data_buffer);
 	close(epoll_fd);
 
+	rados_ioctx_destroy(bucket_io_ctx);
+	rados_ioctx_destroy(data_io_ctx);
+
 	return NULL;
 }
 
@@ -173,10 +190,10 @@ int main(int argc, char *argv[])
 {
 	struct sigaction sa;
 	const int enable = 1;
+	int err;
 
 	struct sockaddr_in server_addr, client_addr;
 	int server_fd;
-	int err;
 
 	long nproc = sysconf(_SC_NPROCESSORS_ONLN);
 	pthread_t threads[nproc];
@@ -222,43 +239,54 @@ int main(int argc, char *argv[])
 	}
 
 	// Listen for incoming connections
-	if (listen(server_fd, 5) == -1) {
+	if (listen(server_fd, 32) == -1) {
 		perror("listen");
 		exit(EXIT_FAILURE);
 	}
+
+	cpu_set_t cpus;
+	pthread_attr_t attr;
+	sigset_t sigmask;
+
+	sigemptyset(&sigmask);
+	sigaddset(&sigmask, SIGINT);
+
+	pthread_attr_init(&attr);
 
 	sa.sa_handler = handleCtrlC;
 	sa.sa_flags = 0;
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGUSR1, &sa, NULL);
 
 	random_buffer = malloc(BUF_SIZE);
-
-	err = rados_ioctx_create(cluster, BUCKET_POOL, &(bucket_io_ctx));
-	if (err < 0) {
-		fprintf(stderr, "cannot open rados pool %s: %s\n", BUCKET_POOL, strerror(-err));
-		rados_shutdown(cluster);
-		exit(1);
-	}
-
-	err = rados_ioctx_create(cluster, DATA_POOL, &(data_io_ctx));
-	if (err < 0) {
-		fprintf(stderr, "cannot open rados pool %s: %s\n", DATA_POOL, strerror(-err));
-		rados_shutdown(cluster);
-		exit(1);
-	}
 
 	printf("Server is listening on port %d with %d threads\n", PORT, nproc);
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
 		param[i].server_fd = server_fd;
-		if (pthread_create(&threads[i], NULL, conn_wait, &param[i]) != 0) {
+
+		CPU_ZERO(&cpus);
+		CPU_SET((i + 1) % nproc, &cpus);
+
+		pthread_attr_setsigmask_np(&attr, &sigmask);
+		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
+
+		if (pthread_create(&threads[i], &attr, conn_wait, &param[i]) != 0) {
 			fprintf(stderr, "fail to create thread %d\n", i);
 			exit(1);
 		}
 	}
 
+	// block until SIGINT
+	pause();
+
 	for (int i = 0; i < nproc; i++) {
+		if (pthread_kill(threads[i], SIGUSR1) != 0) {
+			fprintf(stderr, "fail to signal thread %d\n", i);
+			exit(1);
+		}
+
 		if (pthread_join(threads[i], NULL) != 0) {
 			fprintf(stderr, "fail to join thread %d\n", i);
 			exit(1);
@@ -271,8 +299,10 @@ int main(int argc, char *argv[])
 
 
 	//free(client_data_buffer);
+	free(random_buffer);
 	close(server_fd);
 	rados_shutdown(cluster);
+	pthread_attr_destroy(&attr);
 	printf("Server terminated!\n");
 
 	return 0;

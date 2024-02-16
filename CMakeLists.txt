@@ -28,6 +28,7 @@ endif()
 
 set(C_SRC
     src/http_client.c
+    src/object_store.c
     src/md5.c
     src/util.c
 )
