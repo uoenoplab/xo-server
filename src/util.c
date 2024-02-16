@@ -6,6 +6,12 @@
 
 #include "util.h"
 
+double elapsed_time(struct timespec a, struct timespec b)
+{
+	double elapsed = (double)(a.tv_sec - b.tv_sec) + (double)(a.tv_nsec - b.tv_nsec) / (double)1e9;
+	return elapsed;
+}
+
 void get_datetime_str(char *buf, size_t length)
 {
 	time_t now = time(0);
