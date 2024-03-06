@@ -37,6 +37,10 @@ static char *AMZ_REQUEST_ID = (char*)"tx000009a75d393f1564ec2-0065202454-3771-de
 struct http_client {
 	int fd;
 
+	char *put_buf;
+	rados_completion_t aio_completion[MAX_AIO_OP];
+	size_t outstanding_aio_count;
+
 	llhttp_t parser;
 	llhttp_settings_t settings;
 	enum http_expect expect;
@@ -64,9 +68,6 @@ struct http_client {
 	bool parsing;
 	bool deleting;
 
-	rados_completion_t aio_completion[MAX_AIO_OP];
-	size_t num_outstanding_aio;
-
 	size_t current_chunk_size;
 	size_t current_chunk_offset;
 	RollingMD5Context md5_ctx;
@@ -77,8 +78,8 @@ struct http_client {
 extern __thread struct http_client *http_clients[MAX_HTTP_CLIENTS];
 
 extern rados_t cluster;
-extern __thread rados_ioctx_t bucket_io_ctx;
-extern __thread rados_ioctx_t data_io_ctx;
+extern _Thread_local rados_ioctx_t bucket_io_ctx;
+extern _Thread_local rados_ioctx_t data_io_ctx;
 
 struct http_client *create_http_client(int fd);
 void reset_http_client(struct http_client *client);

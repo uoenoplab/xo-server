@@ -41,7 +41,7 @@ struct thread_param {
 };
 
 void handleCtrlC(int signum) {
-//	printf("Received Ctrl+C. Stopping the server thread [%d]...\n", gettid());
+	printf("Received Ctrl+C. Stopping the server thread [%d]...\n", gettid());
 	server_running = 0; // Set the flag to stop the server gracefully.
 }
 
@@ -172,7 +172,11 @@ void *conn_wait(void *arg)
 			if (events[i].data.fd == server_fd) {
 				handle_new_connection(epoll_fd, server_fd, thread_id);
 			} else {
+				struct timespec t0, t1;
+				clock_gettime(CLOCK_MONOTONIC, &t0);
 				handle_client_data(epoll_fd, events[i].data.fd, client_data_buffer, thread_id);
+				clock_gettime(CLOCK_MONOTONIC, &t1);
+				//printf("handle_client_data:\t%f s\n", elapsed_time(t1, t0));
 			}
 		}
 	}
@@ -195,7 +199,8 @@ int main(int argc, char *argv[])
 	struct sockaddr_in server_addr, client_addr;
 	int server_fd;
 
-	long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+	//long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+	long nproc = 1;
 	pthread_t threads[nproc];
 	struct thread_param param[nproc];
 
@@ -261,7 +266,7 @@ int main(int argc, char *argv[])
 
 	random_buffer = malloc(BUF_SIZE);
 
-	printf("Server is listening on port %d with %d threads\n", PORT, nproc);
+	printf("Server is listening on port %d with %ld threads\n", PORT, nproc);
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
 		param[i].server_fd = server_fd;

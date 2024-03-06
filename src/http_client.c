@@ -1,11 +1,12 @@
 #include <assert.h>
+#include <time.h>
 
 #include "http_client.h"
 #include "object_store.h"
 
 rados_t cluster;
-__thread rados_ioctx_t bucket_io_ctx;
-__thread rados_ioctx_t data_io_ctx;
+_Thread_local rados_ioctx_t bucket_io_ctx;
+_Thread_local rados_ioctx_t data_io_ctx;
 
 __thread struct http_client *http_clients[MAX_HTTP_CLIENTS] = { NULL };
 size_t BUF_SIZE = sizeof(char) * 1024;
@@ -39,7 +40,6 @@ void reset_http_client(struct http_client *client)
 	client->http_payload_size = 0;
 	client->parsing = false;
 	client->deleting = false;
-	client->num_outstanding_aio = 0;
 
 	client->current_chunk_size = 0;
 	client->current_chunk_offset = 0;
@@ -85,7 +85,11 @@ int on_body_cb(llhttp_t *parser, const char *at, size_t length)
 	if (client->method == HTTP_PUT) {
 		//printf("on body, turn on parsing, at(%ld): %.88s\n", length, at);
 		//client->parsing = true;
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
 		put_object(client, at, length);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		//printf("put_object:\t\t%f s\n", elapsed_time(t1, t0));
 	}
 	else if (client->method == HTTP_POST) {
 		if (client->deleting == true) {
@@ -140,14 +144,22 @@ int on_message_complete_cb(llhttp_t* parser)
 	}
 	else if (client->method == HTTP_PUT) {
 		// if put
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
 		complete_put_request(client, datetime_str, &response, &response_size);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		printf("complete PUT request:\t%f s\n", elapsed_time(t1, t0));
 	}
 	else if (client->method == HTTP_POST) {
 		// if post
 		complete_post_request(client, datetime_str, &response, &response_size, &data_payload, &data_payload_size);
 	}
 	else if (client->method == HTTP_GET) {
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
 		complete_get_request(client, datetime_str, &response, &response_size, &data_payload, &data_payload_size);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		//printf("complete GET request: %f s\n", elapsed_time(t1, t0));
 	}
 	else if (client->method == HTTP_DELETE) {
 		complete_delete_request(client, datetime_str, &response, &response_size, &data_payload, &data_payload_size);
@@ -169,8 +181,12 @@ int on_message_complete_cb(llhttp_t* parser)
 		iov_count++;
 	}
 
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
 	ret = writev(client->fd, iov, iov_count);
 	if (ret == -1) perror("writev");
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	//printf("writev: %f s\n", elapsed_time(t1, t0));
 
 	free(response);
 	if (data_payload != NULL) free(data_payload);
@@ -203,23 +219,10 @@ struct http_client *create_http_client(int fd)
 	reset_http_client(client);
 	client->fd = fd;
 	client->parser.data = client;
+	client->outstanding_aio_count = 0;
 
 	client->bucket_io_ctx = &bucket_io_ctx;
 	client->data_io_ctx = &data_io_ctx;
-
-//	err = rados_ioctx_create(cluster, BUCKET_POOL, &(client->bucket_io_ctx));
-//	if (err < 0) {
-//		fprintf(stderr, "cannot open rados pool %s: %s\n", BUCKET_POOL, strerror(-err));
-//		rados_shutdown(cluster);
-//		exit(1);
-//	}
-
-//	err = rados_ioctx_create(cluster, DATA_POOL, &(client->data_io_ctx));
-//	if (err < 0) {
-//		fprintf(stderr, "cannot open rados pool %s: %s\n", DATA_POOL, strerror(-err));
-//		rados_shutdown(cluster);
-//		exit(1);
-//	}
 
 	return client;
 }

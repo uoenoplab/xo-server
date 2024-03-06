@@ -1,5 +1,8 @@
+#include <errno.h>
 #include <assert.h>
 #include <string.h>
+
+#include <time.h>
 
 #include "object_store.h"
 
@@ -14,44 +17,13 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 {
 	int ret;
 	char *ptr = (char*)buf;
-	size_t current_chunk_size = client->current_chunk_size;
-	size_t current_chunk_offset = client->current_chunk_offset;
 
-	struct timespec t0, t1;
-
-	if (!client->chunked_upload) {
-		//printf("length:%ld offset:%ld\n", length, client->object_offset);
-		ret = rados_write(client->data_io_ctx, client->object_name, ptr, length, client->object_offset);
-//		clock_gettime(CLOCK_MONOTONIC, &t0);
-		assert(ret == 0);
-		if (ret) {
-			perror("rados_write");
-			exit(1);
-		}
-//		clock_gettime(CLOCK_MONOTONIC, &t1);
-//		printf("write: rados_write: %f s\n", elapsed_time(t1, t0));
-
-//		clock_gettime(CLOCK_MONOTONIC, &t0);
-		rados_aio_create_completion(NULL, NULL, NULL, &client->aio_completion[client->num_outstanding_aio]);
-//		clock_gettime(CLOCK_MONOTONIC, &t1);
-//		printf("write: create aio: %f s\n", elapsed_time(t1, t0));
-//
-//		clock_gettime(CLOCK_MONOTONIC, &t0);
-		ret = rados_aio_write(client->data_io_ctx, client->object_name, client->aio_completion[client->num_outstanding_aio++], ptr, length, client->object_offset);
-//		clock_gettime(CLOCK_MONOTONIC, &t1);
-//		if (ret) {
-//			perror("rados_write");
-//			exit(1);
-//		}
-//		printf("write: aio: %f s\n", elapsed_time(t1, t0));
-//
-//		//clock_gettime(CLOCK_MONOTONIC, &t0);
+	if (!client->chunked_upload && client->object_name != NULL) {
+		memcpy(&client->put_buf[client->object_offset], buf, length);
 		updateRollingMD5(&(client->md5_ctx), ptr, length);
-//		//clock_gettime(CLOCK_MONOTONIC, &t1);
-//		//printf("write: md5: %f s\n", elapsed_time(t1, t0));
 
 		client->object_offset += length;
-		client->current_chunk_size += length;
+		client->outstanding_aio_count++;
 	}
 	else {
 		printf("Chunked upload not supported\n");
@@ -76,11 +48,11 @@ void init_object_put_request(struct http_client *client) {
 	}
 	else {
 		client->chunked_upload = true;
-		fprintf(stderr, "chunked upload not supported\n");
 	}
 
 	if (client->object_name != NULL) {
-		rados_set_alloc_hint2(client->data_io_ctx, client->object_name, client->object_size, client->object_size, LIBRADOS_ALLOC_HINT_FLAG_SEQUENTIAL_WRITE);
+		client->put_buf = malloc(client->object_size);
+		rados_set_alloc_hint2(*(client->data_io_ctx), client->object_name, client->object_size, client->object_size, LIBRADOS_ALLOC_HINT_FLAG_SEQUENTIAL_WRITE);
 		initRollingMD5(&(client->md5_ctx));
 	}
 }
@@ -97,18 +69,18 @@ void complete_head_request(struct http_client *client, char *datetime_str, char 
 	// if scopped to bucket
 	if (client->bucket_name != NULL && client->object_name == NULL) {
 		char buf;
-//		ret = rados_read(client->bucket_io_ctx, client->bucket_name, &buf, 0, 0);
-//		if (ret != 0) {
-//			fprintf(stderr, "Bucket %s does not exist\n", client->bucket_name);
-//			*response_size = snprintf(NULL, 0, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str) + 1;
-//			*response = malloc(*response_size);
-//			snprintf(*response, *response_size, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str);
-//		}
-//		else {
+		ret = rados_read(*(client->bucket_io_ctx), client->bucket_name, &buf, 0, 0);
+		if (ret != 0) {
+			fprintf(stderr, "Bucket %s does not exist\n", client->bucket_name);
+			*response_size = snprintf(NULL, 0, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str) + 1;
+			*response = malloc(*response_size);
+			snprintf(*response, *response_size, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str);
+		}
+		else {
 			*response_size = snprintf(NULL, 0, "%s\r\nX-RGW-Object-Count: 430\r\nX-RGW-Bytes-Used: 1803550720\r\nX-RGW-Quota-User-Size: -1\r\nX-RGW-Quota-User-Objects: -1\r\nX-RGW-Quota-Max-Buckets: 5000\r\nX-RGW-Quota-Bucket-Size: -1\r\nX-RGW-Quota-Bucket-Objects: -1\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
 			*response = malloc(*response_size);
 			snprintf(*response, *response_size, "%s\r\nX-RGW-Object-Count: 430\r\nX-RGW-Bytes-Used: 1803550720\r\nX-RGW-Quota-User-Size: -1\r\nX-RGW-Quota-User-Objects: -1\r\nX-RGW-Quota-Max-Buckets: 5000\r\nX-RGW-Quota-Bucket-Size: -1\r\nX-RGW-Quota-Bucket-Objects: -1\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str);
-//		}
+		}
 	}
 }
 
@@ -151,7 +123,7 @@ void complete_post_request(struct http_client *client, char *datetime_str, char 
 						keys[i] = strdup((const char*)content);
 						keys_len[i] = strlen((const char*)content);
 
-						int ret = rados_remove(client->data_io_ctx, (const char*)content);
+						int ret = rados_remove(*(client->data_io_ctx), (const char*)content);
 						if (ret) { perror("rados_remove"); printf("%ld/%ld deleting %s %ld\n", i, num_objects, content, keys_len[i]); }
 
 						response_node = xmlNewChild(response_root_node, NULL, BAD_CAST "Deleted", NULL);
@@ -164,8 +136,8 @@ void complete_post_request(struct http_client *client, char *datetime_str, char 
 			}
 
 			rados_write_op_omap_rm_keys2(write_op, (const char**)keys, keys_len, i);
-			//ret = rados_write_op_operate(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
-			ret = rados_write_op_operate(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
+			//ret = rados_write_op_operate(write_op, client->bucket_io_ctx(client->bucket_io_ctx), client->bucket_name, NULL, 0);
+			ret = rados_write_op_operate(write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
 			assert(ret == 0);
 			rados_release_write_op(write_op);
 
@@ -213,13 +185,11 @@ void complete_delete_request(struct http_client *client, char *datetime_str, cha
 
 		rados_read_op_t read_op = rados_create_read_op();
 		rados_read_op_omap_get_vals2(read_op, NULL, NULL, 1, &iter, &pmore, &prval);
-		//rados_read_op_operate(read_op, client->bucket_io_ctx, client->bucket_name, 0);
-		rados_read_op_operate(read_op, client->bucket_io_ctx, client->bucket_name, 0);
+		rados_read_op_operate(read_op, *(client->bucket_io_ctx), client->bucket_name, 0);
 		rados_omap_get_next2(iter, &object_name, &metadata, &object_name_len, &metadata_len);
 
 		if (object_name == NULL) {
-			//ret = rados_remove(client->bucket_io_ctx, client->bucket_name);
-			ret = rados_remove(client->bucket_io_ctx, client->bucket_name);
+			ret = rados_remove(*(client->bucket_io_ctx), client->bucket_name);
 			if (ret) { perror("rados_remove"); }
 
 			*response_size = snprintf(NULL, 0, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
@@ -267,13 +237,13 @@ void complete_delete_request(struct http_client *client, char *datetime_str, cha
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
 		// delete object
-		ret = rados_remove(client->data_io_ctx, client->object_name);
+		ret = rados_remove(*(client->data_io_ctx), client->object_name);
 		assert(ret == 0);
 
 		const char *key = client->object_name; const size_t keys_len[] = { strlen(key) };
 		rados_write_op_t write_op = rados_create_write_op();
 		rados_write_op_omap_rm_keys2(write_op, &key, keys_len, 1);
-		ret = rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
+		ret = rados_write_op_operate2(write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
 		assert(ret == 0);
 		rados_release_write_op(write_op);
 
@@ -294,7 +264,7 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		// if scopped to bucket, create bucket
 		rados_write_op_t write_op = rados_create_write_op();
 		rados_write_op_create(write_op, LIBRADOS_CREATE_EXCLUSIVE, NULL);
-		ret = rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
+		ret = rados_write_op_operate2(write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
 		if (ret) {
 			// bucket already exist
 			*response_size = snprintf(NULL, 0, "HTTP/1.1 400 Bad Request\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
@@ -313,13 +283,9 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		// if scopped to object, create object
 		char metadata[4096];
 		char md5_hash[MD5_DIGEST_LENGTH * 2 + 1];
-
 		finalizeRollingMD5(&(client->md5_ctx), md5_hash);
 
-		//for (size_t i = 0; i < client->num_outstanding_aio; i++) {
-		//	rados_aio_wait_for_complete(client->aio_completion[i]);
-		//	rados_aio_release(client->aio_completion[i]);
-		//}
+		ret = rados_write(client->data_io_ctx, client->object_name, client->put_buf, client->object_size, 0);
 
 		snprintf(metadata, 4096, "%s;%s;%ld", datetime_str, md5_hash, client->object_size);
 		const size_t key_lens = strlen(client->object_name);
@@ -327,32 +293,18 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		const char *keys = client->object_name;
 		const char *vals = metadata;
 
-//		/* register object to bucket */
-//		struct timespec t0, t1;
-//		clock_gettime(CLOCK_MONOTONIC, &t0);
+		/* register object to bucket */
 		rados_write_op_t write_op = rados_create_write_op();
-//		clock_gettime(CLOCK_MONOTONIC, &t1);
-//		printf("register: create write op: %f s\n", elapsed_time(t1, t0));
-//
-//		clock_gettime(CLOCK_MONOTONIC, &t0);
 		rados_write_op_omap_set2(write_op, &keys, &vals, &key_lens, &val_lens, 1);
-//		clock_gettime(CLOCK_MONOTONIC, &t1);
-//		printf("register: set omap: %f s\n", elapsed_time(t1, t0));
-//
-//		clock_gettime(CLOCK_MONOTONIC, &t0);
-		ret = rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
-//		clock_gettime(CLOCK_MONOTONIC, &t1);
-//		printf("register: operate: %f s\n", elapsed_time(t1, t0));
-//		assert(ret == 0);
-//
-//		clock_gettime(CLOCK_MONOTONIC, &t0);
+		ret = rados_write_op_operate2(write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
+		assert(ret == 0);
 		rados_release_write_op(write_op);
-//		clock_gettime(CLOCK_MONOTONIC, &t1);
-//		printf("register: release write op: %f s\n", elapsed_time(t1, t0));
 
-		*response_size = snprintf(NULL, 0, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, AMZ_REQUEST_ID, datetime_str) + 1;
+		//*response_size = snprintf(NULL, 0, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, AMZ_REQUEST_ID, datetime_str) + 1;
+		*response_size = snprintf(NULL, 0, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, "xxx", AMZ_REQUEST_ID, datetime_str) + 1;
 		*response = malloc(*response_size);
-		snprintf(*response, *response_size, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, AMZ_REQUEST_ID, datetime_str);
+		//snprintf(*response, *response_size, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, AMZ_REQUEST_ID, datetime_str);
+		snprintf(*response, *response_size, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, "xxx", AMZ_REQUEST_ID, datetime_str);
 
 		object_count++;
 	}
@@ -375,8 +327,7 @@ void complete_get_request(struct http_client *client, char *datetime_str, char *
 		// if GET bucket service: no objects
 		// check if bucket exist
 		int ret = 1; char buf;
-		//ret = rados_read(client->bucket_io_ctx, client->bucket_name, &buf, 0, 0);
-		ret = rados_read(client->bucket_io_ctx, client->bucket_name, &buf, 0, 0);
+		ret = rados_read(*(client->bucket_io_ctx), client->bucket_name, &buf, 0, 0);
 		if (ret != 0) {
 			// 404
 			printf("bucket %s not found!\n", client->bucket_name),
@@ -436,7 +387,7 @@ void complete_get_request(struct http_client *client, char *datetime_str, char *
 			rados_read_op_t read_op = rados_create_read_op();
 
 			rados_read_op_omap_get_vals2(read_op, prefix, continue_from, 5000, &iter, &pmore, &prval);
-			rados_read_op_operate(read_op, client->bucket_io_ctx, client->bucket_name, 0);
+			rados_read_op_operate(read_op, *(client->bucket_io_ctx), client->bucket_name, 0);
 
 			root_node = xmlNewNode(NULL, BAD_CAST "ListBucketResult");
 			xmlNewProp(root_node, BAD_CAST "xmlns", BAD_CAST "http://s3.amazonaws.com/doc/2006-03-01/");
@@ -533,60 +484,66 @@ void complete_get_request(struct http_client *client, char *datetime_str, char *
 		char *object_name, *metadata;
 		size_t object_name_len, metadata_len;
 
-		const char *last_modified_datetime_str = "Thu, 25 Jan 2024 15:33:44 GMT";
-		const char *etag = "1463144381b8de6c51b5653a7567e233";
-		*data_payload_size = 1 * 1024 * 1024 * sizeof(char);
-		*data_payload = (char*)malloc(*data_payload_size);
-
-		ret = rados_read(client->data_io_ctx, client->object_name, *data_payload, *data_payload_size, 0);
-		*data_payload_size = ret;
-		client->object_size = *data_payload_size;
+//		const char *last_modified_datetime_str = "Thu, 25 Jan 2024 15:33:44 GMT";
+//		const char *etag = "1463144381b8de6c51b5653a7567e233";
+//		*data_payload_size = 1 * 1024 * 1024 * sizeof(char);
+//		*data_payload = (char*)malloc(*data_payload_size);
+//		ret = rados_read(*(client->data_io_ctx), client->object_name, *data_payload, *data_payload_size, 0);
+//		*data_payload_size = ret;
+//		client->object_size = *data_payload_size;
 		//printf("rados read object %s for %ld\n", client->object_name, *data_payload_size);
 
-		*response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str) + 1;
-		*response = malloc(*response_size);
-		snprintf(*response, *response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str);
+//		*response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str) + 1;
+//		*response = malloc(*response_size);
+//		snprintf(*response, *response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str);
 
 //		rados_read_op_t read_op = rados_create_read_op();
 //		rados_read_op_omap_get_vals2(read_op, NULL, client->object_name, 1, &iter, NULL, &omap_prval);
-//		//rados_read_op_operate(read_op, client->bucket_io_ctx, client->bucket_name, 0);
-//		rados_read_op_operate(read_op, client->bucket_io_ctx, client->bucket_name, 0);
+//		rados_read_op_operate(read_op, *(client->bucket_io_ctx), client->bucket_name, 0);
 //		rados_omap_get_next2(iter, &object_name, &metadata, &object_name_len, &metadata_len);
-//
-//		if (object_name == NULL || metadata == NULL) {
-//			printf("object %s not found\n", client->object_name);
-//			*response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
-//			*response = malloc(*response_size);
-//			snprintf(*response, *response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
-//
-//			*data_payload = NULL;
-//			*data_payload_size = 0;
-//		}
-//		else {
-//			//metadata[metadata_len] = 0;
-//			char *data = strdup(metadata);
-//
-//			char *token = strtok(data, ";");
-//			strncpy(last_modified_datetime_str, token, 4096);
-//			//convertToISODateTime(token, last_modified_datetime_str);
-//			token = strtok(NULL, ";");
-//			etag = strdup(token);
-//			token = strtok(NULL, ";");
-//			client->object_size = atol(token);
-//			//printf("got metadata: %s %s %ld\n", last_modified_datetime_str, etag, client->object_size);
-//
-//			*data_payload_size = client->object_size;
-//			*data_payload = malloc(client->object_size);
-//			ret = rados_read(client->data_io_ctx, client->object_name, *data_payload, client->object_size, 0);
-//
-//			*response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str) + 1;
-//			*response = malloc(*response_size);
-//			snprintf(*response, *response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str);
-//
-//			free(etag);
-//			free(data);
-//		}
-//
-//		rados_release_read_op(read_op);
+
+		client->object_size = 1048576;
+		*data_payload_size = client->object_size;
+		*data_payload = malloc(client->object_size);
+		ret = rados_read(*(client->data_io_ctx), client->object_name, *data_payload, client->object_size, 0);
+
+		if (ret != client->object_size) {
+			printf("object %s not found\n", client->object_name);
+			*response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
+			*response = malloc(*response_size);
+			snprintf(*response, *response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
+
+			*data_payload = NULL;
+			*data_payload_size = 0;
+		}
+		else {
+			////metadata[metadata_len] = 0;
+			//char last_modified_datetime_str[4096];
+			//char *data = strdup(metadata);
+
+			//char *token = strtok(data, ";");
+			//strncpy(last_modified_datetime_str, token, 4095);
+			////convertToISODateTime(token, last_modified_datetime_str);
+			//token = strtok(NULL, ";");
+			//char *etag = strdup(token);
+			//token = strtok(NULL, ";");
+			//client->object_size = atol(token);
+			//printf("got metadata: %s %s %ld\n", last_modified_datetime_str, etag, client->object_size);
+
+			//*data_payload_size = client->object_size;
+			//*data_payload = malloc(client->object_size);
+			//ret = rados_read(*(client->data_io_ctx), client->object_name, *data_payload, client->object_size, 0);
+
+			char *etag = "xxx";
+			char *last_modified_datetime_str = "yyy";
+			*response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str) + 1;
+			*response = malloc(*response_size);
+			snprintf(*response, *response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str);
+
+			//free(etag);
+			//free(data);
+		}
+
+		//rados_release_read_op(read_op);
 	}
 }

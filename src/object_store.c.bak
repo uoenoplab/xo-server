@@ -478,8 +478,7 @@ void complete_put_request(struct http_client *client, char *datetime_str, char *
 		// if scopped to bucket, create bucket
 		rados_write_op_t write_op = rados_create_write_op();
 		rados_write_op_create(write_op, LIBRADOS_CREATE_EXCLUSIVE, NULL);
-		//ret = rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
-		ret = rados_write_op_operate2(write_op, bucket_io_ctx, client->bucket_name, NULL, 0);
+		ret = rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
 		if (ret) {
 			// bucket already exist
 			*response_size = snprintf(NULL, 0, "HTTP/1.1 400 Bad Request\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
