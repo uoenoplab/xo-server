@@ -40,6 +40,8 @@ struct http_client {
 	char *put_buf;
 	rados_completion_t aio_completion[MAX_AIO_OP];
 	size_t outstanding_aio_count;
+	rados_write_op_t write_op;
+	rados_read_op_t read_op;
 
 	llhttp_t parser;
 	llhttp_settings_t settings;

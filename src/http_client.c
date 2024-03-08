@@ -1,6 +1,8 @@
 #include <assert.h>
 #include <time.h>
 
+#include <sys/uio.h>
+
 #include "http_client.h"
 #include "object_store.h"
 
@@ -11,8 +13,6 @@ _Thread_local rados_ioctx_t data_io_ctx;
 __thread struct http_client *http_clients[MAX_HTTP_CLIENTS] = { NULL };
 size_t BUF_SIZE = sizeof(char) * 1024;
 char *random_buffer;
-
-static int object_count = 0;
 
 void reset_http_client(struct http_client *client)
 {
@@ -144,21 +144,20 @@ int on_message_complete_cb(llhttp_t* parser)
 	}
 	else if (client->method == HTTP_PUT) {
 		// if put
-		struct timespec t0, t1;
-		clock_gettime(CLOCK_MONOTONIC, &t0);
+		//struct timespec t0, t1;
+		//clock_gettime(CLOCK_MONOTONIC, &t0);
 		complete_put_request(client, datetime_str, &response, &response_size);
-		clock_gettime(CLOCK_MONOTONIC, &t1);
-		printf("complete PUT request:\t%f s\n", elapsed_time(t1, t0));
+		//clock_gettime(CLOCK_MONOTONIC, &t1);
 	}
 	else if (client->method == HTTP_POST) {
 		// if post
 		complete_post_request(client, datetime_str, &response, &response_size, &data_payload, &data_payload_size);
 	}
 	else if (client->method == HTTP_GET) {
-		struct timespec t0, t1;
-		clock_gettime(CLOCK_MONOTONIC, &t0);
+		//struct timespec t0, t1;
+		//clock_gettime(CLOCK_MONOTONIC, &t0);
 		complete_get_request(client, datetime_str, &response, &response_size, &data_payload, &data_payload_size);
-		clock_gettime(CLOCK_MONOTONIC, &t1);
+		//clock_gettime(CLOCK_MONOTONIC, &t1);
 		//printf("complete GET request: %f s\n", elapsed_time(t1, t0));
 	}
 	else if (client->method == HTTP_DELETE) {
@@ -181,11 +180,11 @@ int on_message_complete_cb(llhttp_t* parser)
 		iov_count++;
 	}
 
-	struct timespec t0, t1;
-	clock_gettime(CLOCK_MONOTONIC, &t0);
+	//struct timespec t0, t1;
+	//clock_gettime(CLOCK_MONOTONIC, &t0);
 	ret = writev(client->fd, iov, iov_count);
 	if (ret == -1) perror("writev");
-	clock_gettime(CLOCK_MONOTONIC, &t1);
+	//clock_gettime(CLOCK_MONOTONIC, &t1);
 	//printf("writev: %f s\n", elapsed_time(t1, t0));
 
 	free(response);
@@ -202,7 +201,6 @@ int on_reset_cb(llhttp_t *parser)
 
 struct http_client *create_http_client(int fd)
 {
-	int err;
 	struct http_client *client = (struct http_client*)calloc(1, sizeof(struct http_client));
 
 	llhttp_settings_init(&(client->settings));
