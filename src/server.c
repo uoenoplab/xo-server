@@ -147,7 +147,7 @@ void *conn_wait(void *arg)
 	}
 
 	// Add the server socket to the epoll event list
-	event.events = EPOLLIN;
+	event.events = EPOLLIN | EPOLLOUT;
 	event.data.fd = server_fd;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
 		perror("epoll_ctl");

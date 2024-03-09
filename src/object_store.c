@@ -55,6 +55,7 @@ void init_object_put_request(struct http_client *client) {
 		char *obj_size_str = malloc(obj_size_str_len);
 		snprintf(obj_size_str, obj_size_str_len, "%ld", client->object_size) * sizeof(char);
 
+		rados_release_write_op(client->write_op);
 		client->write_op = rados_create_write_op();
 		rados_write_op_create(client->write_op, LIBRADOS_CREATE_EXCLUSIVE, NULL);
 		rados_write_op_setxattr(client->write_op, "size", obj_size_str, obj_size_str_len);
@@ -66,7 +67,7 @@ void init_objects_delete_request(struct http_client *client) {
 	client->deleting = true;
 }
 
-void complete_head_request(struct http_client *client, const char *datetime_str, char **response, size_t *response_size)
+void complete_head_request(struct http_client *client, const char *datetime_str)
 {
 	int ret = 0;
 
@@ -76,19 +77,22 @@ void complete_head_request(struct http_client *client, const char *datetime_str,
 		ret = rados_read(*(client->bucket_io_ctx), client->bucket_name, &buf, 0, 0);
 		if (ret != 0) {
 			fprintf(stderr, "Bucket %s does not exist\n", client->bucket_name);
-			*response_size = snprintf(NULL, 0, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str) + 1;
-			*response = malloc(*response_size);
-			snprintf(*response, *response_size, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str);
+			client->response_size = snprintf(NULL, 0, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str) + 1;
+			client->response = malloc(client->response_size);
+			snprintf(client->response, client->response_size, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str);
 		}
 		else {
-			*response_size = snprintf(NULL, 0, "%s\r\nX-RGW-Object-Count: 430\r\nX-RGW-Bytes-Used: 1803550720\r\nX-RGW-Quota-User-Size: -1\r\nX-RGW-Quota-User-Objects: -1\r\nX-RGW-Quota-Max-Buckets: 5000\r\nX-RGW-Quota-Bucket-Size: -1\r\nX-RGW-Quota-Bucket-Objects: -1\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
-			*response = malloc(*response_size);
-			snprintf(*response, *response_size, "%s\r\nX-RGW-Object-Count: 430\r\nX-RGW-Bytes-Used: 1803550720\r\nX-RGW-Quota-User-Size: -1\r\nX-RGW-Quota-User-Objects: -1\r\nX-RGW-Quota-Max-Buckets: 5000\r\nX-RGW-Quota-Bucket-Size: -1\r\nX-RGW-Quota-Bucket-Objects: -1\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str);
+			client->response_size = snprintf(NULL, 0, "%s\r\nX-RGW-Object-Count: 430\r\nX-RGW-Bytes-Used: 1803550720\r\nX-RGW-Quota-User-Size: -1\r\nX-RGW-Quota-User-Objects: -1\r\nX-RGW-Quota-Max-Buckets: 5000\r\nX-RGW-Quota-Bucket-Size: -1\r\nX-RGW-Quota-Bucket-Objects: -1\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
+			client->response = malloc(client->response_size);
+			snprintf(client->response, client->response_size, "%s\r\nX-RGW-Object-Count: 430\r\nX-RGW-Bytes-Used: 1803550720\r\nX-RGW-Quota-User-Size: -1\r\nX-RGW-Quota-User-Objects: -1\r\nX-RGW-Quota-Max-Buckets: 5000\r\nX-RGW-Quota-Bucket-Size: -1\r\nX-RGW-Quota-Bucket-Objects: -1\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str);
 		}
+		send_response(client);
 	}
+
+	reset_http_client(client);
 }
 
-void complete_post_request(struct http_client *client, const char *datetime_str, char **response, size_t *response_size, char **data_payload, size_t *data_payload_size)
+void complete_post_request(struct http_client *client, const char *datetime_str)
 {
 	int ret = 0;
 
@@ -114,6 +118,7 @@ void complete_post_request(struct http_client *client, const char *datetime_str,
 			size_t num_objects = 65536; //xmlChildElementCount(node);
 			size_t i;
 
+			rados_release_write_op(client->write_op);
 			client->write_op = rados_create_write_op();
 			char *keys[num_objects];
 			size_t keys_len[num_objects];
@@ -142,13 +147,12 @@ void complete_post_request(struct http_client *client, const char *datetime_str,
 			rados_write_op_omap_rm_keys2(client->write_op, (const char**)keys, keys_len, i);
 			ret = rados_write_op_operate(client->write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
 			assert(ret == 0);
-			rados_release_write_op(client->write_op);
 
 			// dump XML document
 			xmlDocDumpMemoryEnc(response_doc, &xmlbuf, &xmlbuf_size, "UTF-8");
-			*data_payload = malloc(xmlbuf_size);
-			memcpy(*data_payload, xmlbuf, xmlbuf_size);
-			*data_payload_size = xmlbuf_size;
+			client->data_payload = malloc(xmlbuf_size);
+			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
+			client->data_payload_size = xmlbuf_size;
 
 			xmlFreeParserCtxt(client->xml_ctx);
 			xmlCleanupParser();
@@ -162,19 +166,22 @@ void complete_post_request(struct http_client *client, const char *datetime_str,
 		}
 		else {
 			xmlbuf_size = 0;
-			*data_payload_size = 0;
-			*data_payload = NULL;
+			client->data_payload_size = 0;
+			client->data_payload = NULL;
 		}
 
-		*response_size = snprintf(NULL, 0, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, xmlbuf_size, datetime_str) + 1;
-		*response = malloc(*response_size);
-		snprintf(*response, *response_size, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, xmlbuf_size, datetime_str);
+		client->response_size = snprintf(NULL, 0, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, xmlbuf_size, datetime_str) + 1;
+		client->response = malloc(client->response_size);
+		snprintf(client->response, client->response_size, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, xmlbuf_size, datetime_str);
 
 		client->deleting = false;
+
+		send_response(client);
+		reset_http_client(client);
 	}
 }
 
-void complete_delete_request(struct http_client *client, const char *datetime_str, char **response, size_t *response_size, char **data_payload, size_t *data_payload_size)
+void complete_delete_request(struct http_client *client, const char *datetime_str)
 {
 	int ret = 0;
 
@@ -195,12 +202,12 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 			ret = rados_remove(*(client->bucket_io_ctx), client->bucket_name);
 			if (ret) { perror("rados_remove"); }
 
-			*response_size = snprintf(NULL, 0, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
-			*response = malloc(*response_size);
-			snprintf(*response, *response_size, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str);
+			client->response_size = snprintf(NULL, 0, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
+			client->response = malloc(client->response_size);
+			snprintf(client->response, client->response_size, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str);
 
-			*data_payload = NULL;
-			*data_payload_size = 0;
+			client->data_payload = NULL;
+			client->data_payload_size = 0;
 		}
 		else {
 			// not empty
@@ -222,13 +229,13 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 			// dump response xml
 			xmlDocDumpMemoryEnc(doc, &xmlbuf, &xmlbuf_size, "UTF-8");
 
-			*response_size = snprintf(NULL, 0, "HTTP/1.1 409 Conflict\r\nx-amz-request-id: %s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, xmlbuf_size, datetime_str) + 1;
-			*response = malloc(*response_size);
-			snprintf(*response, *response_size, "HTTP/1.1 409 Conflict\r\nx-amz-request-id: %s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, xmlbuf_size, datetime_str);
+			client->response_size = snprintf(NULL, 0, "HTTP/1.1 409 Conflict\r\nx-amz-request-id: %s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, xmlbuf_size, datetime_str) + 1;
+			client->response = malloc(client->response_size);
+			snprintf(client->response, client->response_size, "HTTP/1.1 409 Conflict\r\nx-amz-request-id: %s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, xmlbuf_size, datetime_str);
 
-			*data_payload = malloc(xmlbuf_size);
-			memcpy(*data_payload, xmlbuf, xmlbuf_size);
-			*data_payload_size = xmlbuf_size;
+			client->data_payload = malloc(xmlbuf_size);
+			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
+			client->data_payload_size = xmlbuf_size;
 
 			// cleanup
 			xmlFree(xmlbuf);
@@ -237,6 +244,9 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 
 		rados_omap_get_end(iter);
 		rados_release_read_op(read_op);
+
+		send_response(client);
+		reset_http_client(client);
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
 		// delete object
@@ -244,43 +254,50 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 		assert(ret == 0);
 
 		const char *key = client->object_name; const size_t keys_len[] = { strlen(key) };
+		rados_release_write_op(client->write_op);
 		client->write_op = rados_create_write_op();
 		rados_write_op_omap_rm_keys2(client->write_op, &key, keys_len, 1);
 		ret = rados_write_op_operate2(client->write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
 		assert(ret == 0);
-		rados_release_write_op(client->write_op);
 
-		*response_size = snprintf(NULL, 0, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
-		*response = malloc(*response_size);
-		snprintf(*response, *response_size, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str);
+		client->response_size = snprintf(NULL, 0, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
+		client->response = malloc(client->response_size);
+		snprintf(client->response, client->response_size, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str);
 
-		*data_payload = NULL;
-		*data_payload_size = 0;
+		client->data_payload = NULL;
+		client->data_payload_size = 0;
+
+		send_response(client);
+		reset_http_client(client);
 	}
+
 }
 
-void complete_put_request(struct http_client *client, const char *datetime_str, char **response, size_t *response_size)
+void complete_put_request(struct http_client *client, const char *datetime_str)
 {
 	int ret = 0;
 
 	if (client->bucket_name != NULL && client->object_name == NULL) {
 		// if scopped to bucket, create bucket
+		rados_release_write_op(client->write_op);
 		client->write_op = rados_create_write_op();
 		rados_write_op_create(client->write_op, LIBRADOS_CREATE_EXCLUSIVE, NULL);
 		ret = rados_write_op_operate2(client->write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
 		if (ret) {
 			// bucket already exist
-			*response_size = snprintf(NULL, 0, "HTTP/1.1 400 Bad Request\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
-			*response = malloc(*response_size);
-			snprintf(*response, *response_size, "HTTP/1.1 400 Bad Request\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str);
+			client->response_size = snprintf(NULL, 0, "HTTP/1.1 400 Bad Request\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
+			client->response = malloc(client->response_size);
+			snprintf(client->response, client->response_size, "HTTP/1.1 400 Bad Request\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str);
 			// add BucketAlreadyExists to payload
 		}
 		else {
-			*response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
-			*response = malloc(*response_size);
-			snprintf(*response, *response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str);
+			client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
+			client->response = malloc(client->response_size);
+			snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str);
 		}
-		rados_release_write_op(client->write_op);
+
+		send_response(client);
+		reset_http_client(client);
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
 		// if scopped to object, create object
@@ -292,9 +309,9 @@ void complete_put_request(struct http_client *client, const char *datetime_str, 
 		rados_write_op_setxattr(client->write_op, "last_modified", datetime_str, strlen(datetime_str) + 1);
 		rados_write_op_write(client->write_op, client->put_buf, client->object_size, 0);
 		rados_write_op_set_alloc_hint2(client->write_op, client->object_size, client->object_size, LIBRADOS_ALLOC_HINT_FLAG_SEQUENTIAL_WRITE);
-		ret = rados_write_op_operate2(client->write_op, *(client->data_io_ctx), client->object_name, NULL, 0);
-		assert(ret == 0);
-		rados_release_write_op(client->write_op);
+		//ret = rados_write_op_operate2(client->write_op, *(client->data_io_ctx), client->object_name, NULL, 0);
+		//ret = rados_aio_write_op_operate2(client->write_op, *(client->data_io_ctx), client->aio_completion, client->object_name, NULL, 0);
+		//assert(ret == 0);
 
 		snprintf(metadata, 4096, "%s;%s;%ld", datetime_str, md5_hash, client->object_size);
 		const size_t key_lens = strlen(client->object_name);
@@ -302,21 +319,28 @@ void complete_put_request(struct http_client *client, const char *datetime_str, 
 		const char *keys = client->object_name;
 		const char *vals = metadata;
 
+		client->response_size = snprintf(NULL, 0, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, AMZ_REQUEST_ID, datetime_str) + 1;
+		client->response = malloc(client->response_size);
+		snprintf(client->response, client->response_size, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, AMZ_REQUEST_ID, datetime_str);
+		rados_aio_release(client->aio_completion);
+		rados_aio_create_completion((void*)client, aio_ack_callback, aio_commit_callback, &(client->aio_completion));
+		ret = rados_aio_write_op_operate2(client->write_op, *(client->data_io_ctx), client->aio_completion, client->object_name, NULL, 0);
+
 		/* register object to bucket */
+		rados_release_write_op(client->write_op);
 		client->write_op = rados_create_write_op();
 		rados_write_op_omap_set2(client->write_op, &keys, &vals, &key_lens, &val_lens, 1);
 		ret = rados_write_op_operate2(client->write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
 		assert(ret == 0);
-		rados_release_write_op(client->write_op);
+		//ret = rados_write_op_operate2(client->write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
+		//assert(ret == 0);
 
-		//*response_size = snprintf(NULL, 0, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, AMZ_REQUEST_ID, datetime_str) + 1;
-		*response_size = snprintf(NULL, 0, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, "xxx", AMZ_REQUEST_ID, datetime_str) + 1;
-		*response = malloc(*response_size);
-		snprintf(*response, *response_size, "%s\r\nEtag: %s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, "xxx", AMZ_REQUEST_ID, datetime_str);
+		//send_response(client);
+		//reset_http_client(client);
 	}
 }
 
-void complete_get_request(struct http_client *client, const char *datetime_str, char **response, size_t *response_size, char **data_payload, size_t *data_payload_size)
+void complete_get_request(struct http_client *client, const char *datetime_str)
 {
 	int ret = 0;
 
@@ -347,12 +371,12 @@ void complete_get_request(struct http_client *client, const char *datetime_str, 
 		if (ret != 0 || prval != 0) {
 			// 404
 			printf("bucket %s not found!\n", client->bucket_name),
-			*response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
-			*response = malloc(*response_size);
-			snprintf(*response, *response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
+			client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
+			client->response = malloc(client->response_size);
+			snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
 
-			*data_payload = NULL;
-			*data_payload_size = 0;
+			client->data_payload = NULL;
+			client->data_payload_size = 0;
 		}
 		else {
 			// go through list of queries
@@ -366,7 +390,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str, 
 
 			if (uriDissectQueryMallocA(&queryList, &itemCount, client->uri.query.first, client->uri.query.afterLast) == URI_SUCCESS) {
 				for (struct UriQueryListStructA *query = queryList; query != NULL; query = query->next) {
-					//fprintf(stdout, "query: (%s,%s)\n", query->key, query->value);
+					fprintf(stdout, "query: (%s,%s)\n", query->key, query->value);
 					if (strcmp(query->key, "location") == 0) {
 						location = true;
 					}
@@ -465,13 +489,13 @@ void complete_get_request(struct http_client *client, const char *datetime_str, 
 
 			// dump XML document
 			xmlDocDumpMemoryEnc(doc, &xmlbuf, &xmlbuf_size, "UTF-8");
-			*response_size = snprintf(NULL, 0, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, xmlbuf_size, datetime_str) + 1;
-			*response = malloc(*response_size);
-			snprintf(*response, *response_size, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, xmlbuf_size, datetime_str);
+			client->response_size = snprintf(NULL, 0, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, xmlbuf_size, datetime_str) + 1;
+			client->response = malloc(client->response_size);
+			snprintf(client->response, client->response_size, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, xmlbuf_size, datetime_str);
 
-			*data_payload = malloc(xmlbuf_size);
-			memcpy(*data_payload, xmlbuf, xmlbuf_size);
-			*data_payload_size = xmlbuf_size;
+			client->data_payload = malloc(xmlbuf_size);
+			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
+			client->data_payload_size = xmlbuf_size;
 
 			// cleanup
 			xmlFree(xmlbuf);
@@ -483,6 +507,9 @@ void complete_get_request(struct http_client *client, const char *datetime_str, 
 		if (prefix) free(prefix);
 		if (continue_from) free(continue_from);
 		rados_release_read_op(client->read_op);
+
+		send_response(client);
+		reset_http_client(client);
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
 		// getting object
@@ -490,23 +517,23 @@ void complete_get_request(struct http_client *client, const char *datetime_str, 
 		int prval;
 		size_t bytes_read;
 
-		*data_payload = malloc(FIRST_READ_SIZE);
+		client->data_payload = malloc(FIRST_READ_SIZE);
 
 		client->read_op = rados_create_read_op();
 		rados_read_op_assert_exists(client->read_op);
 		rados_read_op_getxattrs(client->read_op, &iter, &prval);
-		rados_read_op_read(client->read_op, 0, FIRST_READ_SIZE, *data_payload, &bytes_read, &prval);
+		rados_read_op_read(client->read_op, 0, FIRST_READ_SIZE, client->data_payload, &bytes_read, &prval);
 		ret = rados_read_op_operate(client->read_op, *(client->data_io_ctx), client->object_name, LIBRADOS_OPERATION_BALANCE_READS);
 		rados_release_read_op(client->read_op);
 
 		if (ret != 0) {
 			printf("object %s not found\n", client->object_name);
-			*response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
-			*response = malloc(*response_size);
-			snprintf(*response, *response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
+			client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
+			client->response = malloc(client->response_size);
+			snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
 
-			*data_payload = NULL;
-			*data_payload_size = 0;
+			client->data_payload = NULL;
+			client->data_payload_size = 0;
 		}
 		else {
 			const char *attr_name = NULL;
@@ -518,7 +545,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str, 
 			while (rados_getxattrs_next(iter, &attr_name, &attr_val, &attr_val_len) == 0 && (attr_name != NULL & attr_val != NULL)) {
 				if (strcmp(attr_name, "size") == 0) {
 					client->object_size = atol(attr_val);
-					*data_payload_size = client->object_size;
+					client->data_payload_size = client->object_size;
 				}
 				else if (strcmp(attr_name, "etag") == 0) {
 					etag = strdup(attr_val);
@@ -531,17 +558,19 @@ void complete_get_request(struct http_client *client, const char *datetime_str, 
 
 			if (client->object_size != bytes_read) {
 				size_t tail_size = client->object_size - bytes_read;
-				*data_payload = realloc(*data_payload, client->object_size);
-				ret = rados_read(*(client->data_io_ctx), client->object_name, (*data_payload) + bytes_read, tail_size, bytes_read);
+				client->data_payload = realloc(client->data_payload, client->object_size);
+				ret = rados_read(*(client->data_io_ctx), client->object_name, client->data_payload + bytes_read, tail_size, bytes_read);
 				assert(ret == tail_size);
 			}
 
-			*response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str) + 1;
-			*response = malloc(*response_size);
-			snprintf(*response, *response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str);
+			client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str) + 1;
+			client->response = malloc(client->response_size);
+			snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: %s\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, client->object_size, etag, last_modified_datetime_str, datetime_str);
 
 			//free(etag);
 			//free(last_modified_datetime_str);
 		}
+		send_response(client);
+		reset_http_client(client);
 	}
 }

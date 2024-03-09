@@ -14,8 +14,8 @@
 #define MAX_FIELDS 64
 #define MAX_HTTP_CLIENTS 65536
 
-#define BUCKET_POOL "bucket_pool"
-#define DATA_POOL "data_pool"
+#define BUCKET_POOL "test_bucket_pool"
+#define DATA_POOL "test_data_pool"
 
 enum http_expect { CONTINUE, NONE };
 
@@ -38,10 +38,17 @@ struct http_client {
 	int fd;
 
 	char *put_buf;
-	rados_completion_t aio_completion[MAX_AIO_OP];
 	size_t outstanding_aio_count;
+
 	rados_write_op_t write_op;
 	rados_read_op_t read_op;
+	rados_completion_t aio_completion;
+
+	ssize_t data_payload_size;
+	char *data_payload;
+
+	ssize_t response_size;
+	char *response;
 
 	llhttp_t parser;
 	llhttp_settings_t settings;
@@ -96,5 +103,9 @@ int on_headers_complete_cb(llhttp_t* parser);
 int on_chunk_header(llhttp_t *parser);
 int on_message_complete_cb(llhttp_t* parser);
 int on_reset_cb(llhttp_t *parser);
+
+void send_response(struct http_client *client);
+void aio_ack_callback(rados_completion_t comp, void *arg);
+void aio_commit_callback(rados_completion_t comp, void *arg);
 
 #endif
