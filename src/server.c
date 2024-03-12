@@ -12,10 +12,12 @@
 #include <pthread.h>
 #include <assert.h>
 
+#include <fcntl.h>
+
 #include "http_client.h"
 
 #define PORT 8080
-#define MAX_EVENTS 65536
+#define MAX_EVENTS 655360
 
 // 0.  handle incoming conn
 // 1.  read
@@ -63,8 +65,8 @@ void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
 	printf("Thread %d: Accepted connection (%d) from %s:%d\n", thread_id, new_socket, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
 	// Add the new client socket to the epoll event list
+	fcntl(new_socket, F_SETFL, fcntl(new_socket, F_GETFL, 0) | O_NONBLOCK);
 	struct epoll_event event;
-	//event.events = EPOLLIN | EPOLLET; // Edge-triggered mode
 	event.events = EPOLLIN; // Edge-triggered mode
 	event.data.fd = new_socket;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &event) == -1) {
@@ -72,7 +74,7 @@ void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
 		close(new_socket);
 	}
 
-	http_clients[event.data.fd] = create_http_client(event.data.fd);
+	http_clients[event.data.fd] = create_http_client(epoll_fd, event.data.fd);
 }
 
 void handle_client_disconnect(int epoll_fd, int client_fd)
@@ -124,7 +126,8 @@ void *conn_wait(void *arg)
 
 	char *client_data_buffer = malloc(BUF_SIZE);
 	int epoll_fd, event_count;
-	struct epoll_event event, events[MAX_EVENTS];
+	struct epoll_event event;
+	struct epoll_event *events = (struct epoll_event*)malloc(sizeof(struct epoll_event) * MAX_EVENTS);
 
 	int err = rados_ioctx_create(cluster, BUCKET_POOL, &bucket_io_ctx);
 	if (err < 0) {
@@ -147,7 +150,7 @@ void *conn_wait(void *arg)
 	}
 
 	// Add the server socket to the epoll event list
-	event.events = EPOLLIN | EPOLLOUT;
+	event.events = EPOLLIN;
 	event.data.fd = server_fd;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
 		perror("epoll_ctl");
@@ -171,11 +174,15 @@ void *conn_wait(void *arg)
 			// Handle events using callback functions
 			if (events[i].data.fd == server_fd) {
 				handle_new_connection(epoll_fd, server_fd, thread_id);
-			} else {
-				struct timespec t0, t1;
-				clock_gettime(CLOCK_MONOTONIC, &t0);
+			}
+			else if (events[i].events & EPOLLOUT) {
+				send_client_data(events[i].data.fd);
+			}
+			else if (events[i].events & EPOLLIN) {
+				//struct timespec t0, t1;
+				//clock_gettime(CLOCK_MONOTONIC, &t0);
 				handle_client_data(epoll_fd, events[i].data.fd, client_data_buffer, thread_id);
-				clock_gettime(CLOCK_MONOTONIC, &t1);
+				//clock_gettime(CLOCK_MONOTONIC, &t1);
 				//printf("handle_client_data:\t%f s\n", elapsed_time(t1, t0));
 			}
 		}
@@ -183,6 +190,7 @@ void *conn_wait(void *arg)
 
 	free(client_data_buffer);
 	close(epoll_fd);
+	free(events);
 
 	rados_ioctx_destroy(bucket_io_ctx);
 	rados_ioctx_destroy(data_io_ctx);

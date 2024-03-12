@@ -1,6 +1,8 @@
 #include <assert.h>
 #include <time.h>
 
+#include <errno.h>
+#include <sys/epoll.h>
 #include <sys/uio.h>
 
 #include "http_client.h"
@@ -13,6 +15,53 @@ _Thread_local rados_ioctx_t data_io_ctx;
 __thread struct http_client *http_clients[MAX_HTTP_CLIENTS] = { NULL };
 size_t BUF_SIZE = sizeof(char) * 1024;
 char *random_buffer;
+
+void send_client_data(int client_fd)
+{
+	struct http_client *client = http_clients[client_fd];
+
+	struct iovec iov[2];
+	size_t iov_count = 0;
+
+	if (client->response_sent != client->response_size) {
+		iov[iov_count].iov_base = client->response + client->response_sent;
+		iov[iov_count].iov_len = client->response_size - client->response_sent;
+		iov_count++;
+	}
+
+	if (client->data_payload_sent != client->data_payload_size) {
+		iov[iov_count].iov_base = client->data_payload + client->data_payload_sent;
+		iov[iov_count].iov_len = client->data_payload_size - client->data_payload_sent;
+		iov_count++;
+	}
+
+	int ret = writev(client->fd, iov, iov_count);
+	if (ret != EAGAIN) {
+		// response is not sent
+		if (client->response_sent != client->response_size) {
+			size_t response_left = client->response_size - client->response_sent;
+			if (ret > response_left) {
+				client->response_sent = client->response_size;
+				ret -= response_left;
+			}
+			else {
+				client->response_sent += ret;
+				ret = 0;
+			}
+		}
+
+		client->data_payload_sent += ret;
+		//printf("writev called %ld/%ld %ld/%ld\n", client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
+	}
+
+	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
+		struct epoll_event event = {};
+		event.data.fd = client->fd;
+		event.events = EPOLLIN;
+		epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
+		reset_http_client(client);
+	}
+}
 
 void reset_http_client(struct http_client *client)
 {
@@ -37,10 +86,14 @@ void reset_http_client(struct http_client *client)
 	if (client->response) free(client->response);
 	client->response = NULL;
 	client->response_size = 0;
+	client->response_sent = 0;
 
 	if (client->data_payload) free(client->data_payload);
 	client->data_payload = NULL;
 	client->data_payload_size = 0;
+	client->data_payload_sent = 0;
+
+	client->prval = 0;
 
 	client->bucket_name = NULL;
 	client->chunked_upload = false;
@@ -86,13 +139,10 @@ int on_body_cb(llhttp_t *parser, const char *at, size_t length)
 {
 	struct http_client *client = (struct http_client*)parser->data;
 	if (client->method == HTTP_PUT) {
-		//printf("on body, turn on parsing, at(%ld): %.88s\n", length, at);
-		//client->parsing = true;
 		struct timespec t0, t1;
 		clock_gettime(CLOCK_MONOTONIC, &t0);
 		put_object(client, at, length);
 		clock_gettime(CLOCK_MONOTONIC, &t1);
-		//printf("put_object:\t\t%f s\n", elapsed_time(t1, t0));
 	}
 	else if (client->method == HTTP_POST) {
 		if (client->deleting == true) {
@@ -114,6 +164,14 @@ int on_url_cb(llhttp_t *parser, const char *at, size_t length)
 		fprintf(stderr, "Parse uri fail: %s\n", errorPos);
 		return -1;
 	}
+
+	return 0;
+}
+
+int on_url_complete_cb(llhttp_t* parser)
+{
+	struct http_client *client = (struct http_client*)parser->data;
+
 
 	return 0;
 }
@@ -162,6 +220,7 @@ int on_message_complete_cb(llhttp_t* parser)
 		client->response_size = snprintf(NULL, 0, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str) + 1;
 		client->response = malloc(client->response_size);
 		snprintf(client->response, client->response_size, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str);
+		send_response(client);
 	}
 
 	return 0;
@@ -169,33 +228,18 @@ int on_message_complete_cb(llhttp_t* parser)
 
 void send_response(struct http_client *client)
 {
-	struct iovec iov[3];
-	size_t iov_count = 1;
-
-	iov[0].iov_base = client->response;
-	iov[0].iov_len = strlen(client->response);
-
-	if (client->data_payload != NULL) {
-		iov[1].iov_base = client->data_payload;
-		iov[1].iov_len = client->data_payload_size;
-		iov_count++;
-	}
-
-	//struct timespec t0, t1;
-	//clock_gettime(CLOCK_MONOTONIC, &t0);
-	int ret = writev(client->fd, iov, iov_count);
-	if (ret == -1) perror("writev");
-	//clock_gettime(CLOCK_MONOTONIC, &t1);
-	//printf("writev: %f s\n", elapsed_time(t1, t0));
+	struct epoll_event event = {};
+	event.data.fd = client->fd;
+	event.events = EPOLLOUT;
+	epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 }
 
 void aio_ack_callback(rados_completion_t comp, void *arg) {
+	struct http_client *client = (struct HTTP_Client*)arg;
+	send_response(client);
 }
 
 void aio_commit_callback(rados_completion_t comp, void *arg) {
-	struct http_client *client = (struct HTTP_Client*)arg;
-	send_response(client);
-	reset_http_client(client);
 }
 
 int on_reset_cb(llhttp_t *parser)
@@ -203,7 +247,7 @@ int on_reset_cb(llhttp_t *parser)
 	return 0;
 }
 
-struct http_client *create_http_client(int fd)
+struct http_client *create_http_client(int epoll_fd, int fd)
 {
 	struct http_client *client = (struct http_client*)calloc(1, sizeof(struct http_client));
 
@@ -215,10 +259,13 @@ struct http_client *create_http_client(int fd)
 	client->settings.on_header_value = on_header_value_cb;
 	client->settings.on_headers_complete = on_headers_complete_cb;
 	client->settings.on_url = on_url_cb;
+	client->settings.on_url_complete = on_url_complete_cb;
 	client->settings.on_reset = on_reset_cb;
 	client->settings.on_body = on_body_cb;
 
 	reset_http_client(client);
+
+	client->epoll_fd = epoll_fd;
 	client->fd = fd;
 	client->parser.data = client;
 	client->outstanding_aio_count = 0;
@@ -226,8 +273,13 @@ struct http_client *create_http_client(int fd)
 	client->bucket_io_ctx = &bucket_io_ctx;
 	client->data_io_ctx = &data_io_ctx;
 
+	client->prval = 0;
+
 	client->write_op = rados_create_write_op();
+	client->read_op = rados_create_write_op();
+
 	rados_aio_create_completion((void*)client, aio_ack_callback, aio_commit_callback, &(client->aio_completion));
+	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_head_read_completion));
 
 	return client;
 }
@@ -277,6 +329,9 @@ int on_headers_complete_cb(llhttp_t* parser)
 
 	if (client->method == HTTP_PUT) {
 		init_object_put_request(client);
+	}
+	else if (client->method == HTTP_GET) {
+		init_object_get_request(client);
 	}
 	else if (client->method == HTTP_POST) {
 		UriQueryListA *queryList;

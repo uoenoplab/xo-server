@@ -14,8 +14,8 @@
 #define MAX_FIELDS 64
 #define MAX_HTTP_CLIENTS 65536
 
-#define BUCKET_POOL "test_bucket_pool"
-#define DATA_POOL "test_data_pool"
+#define BUCKET_POOL "bucket_pool"
+#define DATA_POOL "data_pool"
 
 enum http_expect { CONTINUE, NONE };
 
@@ -35,18 +35,26 @@ static char *HTTP_CONTINUE_HDR = (char *)"HTTP/1.1 100 CONTINUE\r\n\r\n";
 static char *AMZ_REQUEST_ID = (char*)"tx000009a75d393f1564ec2-0065202454-3771-default";
 
 struct http_client {
+	int epoll_fd;
 	int fd;
 
 	char *put_buf;
 	size_t outstanding_aio_count;
 
+	int prval;
+	rados_xattrs_iter_t iter;
+
 	rados_write_op_t write_op;
 	rados_read_op_t read_op;
-	rados_completion_t aio_completion;
 
+	rados_completion_t aio_completion;
+	rados_completion_t aio_head_read_completion;
+
+	ssize_t data_payload_sent;
 	ssize_t data_payload_size;
 	char *data_payload;
 
+	ssize_t response_sent;
 	ssize_t response_size;
 	char *response;
 
@@ -90,7 +98,7 @@ extern rados_t cluster;
 extern _Thread_local rados_ioctx_t bucket_io_ctx;
 extern _Thread_local rados_ioctx_t data_io_ctx;
 
-struct http_client *create_http_client(int fd);
+struct http_client *create_http_client(int epoll_fd, int fd);
 void reset_http_client(struct http_client *client);
 void free_http_client(struct http_client *client);
 
@@ -104,6 +112,7 @@ int on_chunk_header(llhttp_t *parser);
 int on_message_complete_cb(llhttp_t* parser);
 int on_reset_cb(llhttp_t *parser);
 
+void send_client_data(int client_fd);
 void send_response(struct http_client *client);
 void aio_ack_callback(rados_completion_t comp, void *arg);
 void aio_commit_callback(rados_completion_t comp, void *arg);
