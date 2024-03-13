@@ -159,6 +159,7 @@ void *conn_wait(void *arg)
 
 	while (server_running) {
 		// Wait for events using epoll
+		memset(events, 0, sizeof(struct epoll_event) * MAX_EVENTS);
 		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 		if (event_count == -1) {
 			if (errno == EINTR || errno == EINTR) {
@@ -172,6 +173,7 @@ void *conn_wait(void *arg)
 
 		for (int i = 0; i < event_count; i++) {
 			// Handle events using callback functions
+			printf("event count %d/%d\n", i, event_count);
 			if (events[i].data.fd == server_fd) {
 				handle_new_connection(epoll_fd, server_fd, thread_id);
 			}

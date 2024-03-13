@@ -73,6 +73,9 @@ void aio_head_read_callback(rados_completion_t comp, void *arg) {
 		snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: \"%s\"\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, full_object_size, etag, last_modified_datetime_str, datetime_str);
 		client->response_size--;
 
+		if (etag) free(etag);
+		if (last_modified_datetime_str) free(last_modified_datetime_str);
+
 		if (client->object_size != full_object_size) {
 			size_t tail_size = full_object_size - client->object_size;
 			size_t bytes_read = client->object_size;
@@ -601,5 +604,7 @@ void init_object_put_request(struct http_client *client) {
 		client->write_op = rados_create_write_op();
 		rados_write_op_create(client->write_op, LIBRADOS_CREATE_EXCLUSIVE, NULL);
 		rados_write_op_setxattr(client->write_op, "size", obj_size_str, obj_size_str_len);
+
+		free(obj_size_str);
 	}
 }
