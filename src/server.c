@@ -35,6 +35,8 @@
 // 5.  check end of payload
 // 5.1 wait for async completion, respond http OK
 
+size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 4;
+
 volatile sig_atomic_t server_running = 1;
 rados_t cluster;
 
@@ -114,7 +116,6 @@ void handle_client_data(int epoll_fd, struct http_client *client, char *client_d
 	enum llhttp_errno ret;
 
 	// Echo the received data back to the client
-	printf("client buf: %.24s\n", client_data_buffer);
 	ret = llhttp_execute(&(client->parser), client_data_buffer, bytes_received);
 	if (ret != HPE_OK) {
 		fprintf(stderr, "Parse error: %s %s\n", llhttp_errno_name(ret), client->parser.reason);

@@ -64,14 +64,14 @@ struct http_client {
 	char *object_name;
 	char *full_object_name;
 
-	char *uri_str;
+	char uri_str[4096];
 	size_t uri_str_len;
-	UriUriA uri;
+	//UriUriA uri;
 
-	//char *header_fields[MAX_FIELDS];
-	//char *header_values[MAX_FIELDS];
-	char **header_fields;
-	char **header_values;
+	char header_fields[MAX_FIELDS][4096];
+	char header_values[MAX_FIELDS][4096];
+	//char **header_fields;
+	//char **header_values;
 	size_t num_fields;
 
 	rados_ioctx_t *bucket_io_ctx;
@@ -96,15 +96,15 @@ struct http_client *create_http_client(int epoll_fd, int fd, rados_ioctx_t *buck
 void reset_http_client(struct http_client *client);
 void free_http_client(struct http_client *client);
 
-int on_header_field_cb(llhttp_t *parser, const char *at, size_t length);
-int on_header_value_cb(llhttp_t *parser, const char *at, size_t length);
-int on_body_cb(llhttp_t *parser, const char *at, size_t length);
-int on_url_cb(llhttp_t *parser, const char *at, size_t length);
-
-int on_headers_complete_cb(llhttp_t* parser);
-int on_chunk_header(llhttp_t *parser);
-int on_message_complete_cb(llhttp_t* parser);
-int on_reset_cb(llhttp_t *parser);
+//static int on_header_field_cb(llhttp_t *parser, const char *at, size_t length);
+//static int on_header_value_cb(llhttp_t *parser, const char *at, size_t length);
+//static int on_body_cb(llhttp_t *parser, const char *at, size_t length);
+//static int on_url_cb(llhttp_t *parser, const char *at, size_t length);
+//
+//static int on_headers_complete_cb(llhttp_t* parser);
+//static int on_chunk_header(llhttp_t *parser);
+//static int on_message_complete_cb(llhttp_t* parser);
+//static int on_reset_cb(llhttp_t *parser);
 
 void send_client_data(struct http_client *client);
 void send_response(struct http_client *client);

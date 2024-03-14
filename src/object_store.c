@@ -16,7 +16,7 @@ void delete_objects(struct http_client *client, const char *buf, size_t length)
 void put_object(struct http_client *client, const char *buf, size_t length)
 {
 	if (!client->chunked_upload && client->object_name != NULL) {
-		memcpy(&(client->put_buf[client->object_offset]), buf, length);
+		memcpy(client->put_buf + client->object_offset, buf, length);
 		updateRollingMD5(&(client->md5_ctx), buf, length);
 
 		client->object_offset += length;
@@ -364,16 +364,24 @@ void complete_put_request(struct http_client *client, const char *datetime_str)
 		char md5_hash[MD5_DIGEST_LENGTH * 2 + 1];
 		finalizeRollingMD5(&(client->md5_ctx), md5_hash);
 
-		rados_write_op_setxattr(client->write_op, "etag", md5_hash, strlen(md5_hash) + 1);
-		rados_write_op_setxattr(client->write_op, "last_modified", datetime_str, strlen(datetime_str) + 1);
-		rados_write_op_write(client->write_op, client->put_buf, client->object_size, 0);
-		rados_write_op_set_alloc_hint2(client->write_op, client->object_size, client->object_size, LIBRADOS_ALLOC_HINT_FLAG_SEQUENTIAL_WRITE);
-
 		snprintf(metadata, 4096, "%s;%s;%ld", datetime_str, md5_hash, client->object_size);
 		const size_t key_lens = strlen(client->object_name);
 		const size_t val_lens = strlen(metadata);
 		const char *keys = client->object_name;
 		const char *vals = metadata;
+
+		/* register object to bucket */
+		rados_write_op_t write_op = rados_create_write_op();
+		rados_write_op_omap_set2(write_op, &keys, &vals, &key_lens, &val_lens, 1);
+		ret = rados_write_op_operate2(write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
+		assert(ret == 0);
+		rados_release_write_op(write_op);
+
+		/* the write op has already been prepared since init put req, DO NOT RELEASE */
+		rados_write_op_setxattr(client->write_op, "etag", md5_hash, strlen(md5_hash) + 1);
+		rados_write_op_setxattr(client->write_op, "last_modified", datetime_str, strlen(datetime_str) + 1);
+		rados_write_op_write(client->write_op, client->put_buf, client->object_size, 0);
+		rados_write_op_set_alloc_hint2(client->write_op, client->object_size, client->object_size, LIBRADOS_ALLOC_HINT_FLAG_SEQUENTIAL_WRITE);
 
 		client->response_size = snprintf(NULL, 0, "%s\r\nEtag: \"%s\"\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, AMZ_REQUEST_ID, datetime_str) + 1;
 		client->response = malloc(client->response_size);
@@ -384,13 +392,6 @@ void complete_put_request(struct http_client *client, const char *datetime_str)
 		rados_aio_release(client->aio_completion);
 		rados_aio_create_completion((void*)client, aio_ack_callback, aio_commit_callback, &(client->aio_completion));
 		ret = rados_aio_write_op_operate2(client->write_op, *(client->data_io_ctx), client->aio_completion, client->object_name, NULL, 0);
-		assert(ret == 0);
-
-		/* register object to bucket */
-		rados_release_write_op(client->write_op);
-		client->write_op = rados_create_write_op();
-		rados_write_op_omap_set2(client->write_op, &keys, &vals, &key_lens, &val_lens, 1);
-		ret = rados_write_op_operate2(client->write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
 		assert(ret == 0);
 	}
 }
@@ -444,7 +445,15 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 
 			doc = xmlNewDoc(BAD_CAST "1.0");
 
-			if (uriDissectQueryMallocA(&queryList, &itemCount, client->uri.query.first, client->uri.query.afterLast) == URI_SUCCESS) {
+			UriUriA uri;
+			char errorPos;
+
+			if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
+				fprintf(stderr, "Parse uri fail: %s\n", errorPos);
+				return -1;
+			}
+
+			if (uriDissectQueryMallocA(&queryList, &itemCount, uri.query.first, uri.query.afterLast) == URI_SUCCESS) {
 				for (struct UriQueryListStructA *query = queryList; query != NULL; query = query->next) {
 					fprintf(stdout, "query: (%s,%s)\n", query->key, query->value);
 					if (strcmp(query->key, "location") == 0) {
@@ -473,6 +482,9 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 				}
 				uriFreeQueryListA(queryList);
 			}
+
+			if (ret == URI_SUCCESS)
+				uriFreeUriMembersA(&uri);
 
 			// return list inside bucket
 			//if (fetch_owner && list_type == 2) {
