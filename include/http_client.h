@@ -10,9 +10,8 @@
 #include "md5.h"
 #include "util.h"
 
-#define MAX_AIO_OP 65536
-#define MAX_FIELDS 64
-#define MAX_HTTP_CLIENTS 65536
+#define MAX_FIELDS 32
+#define MAX_HTTP_CLIENTS 1000
 
 #define BUCKET_POOL "bucket_pool"
 #define DATA_POOL "data_pool"

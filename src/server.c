@@ -17,7 +17,7 @@
 #include "http_client.h"
 
 #define PORT 8080
-#define MAX_EVENTS 655360
+#define MAX_EVENTS 1000
 
 // 0.  handle incoming conn
 // 1.  read
@@ -65,16 +65,21 @@ void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
 	printf("Thread %d: Accepted connection (%d) from %s:%d\n", thread_id, new_socket, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
 	// Add the new client socket to the epoll event list
-	fcntl(new_socket, F_SETFL, fcntl(new_socket, F_GETFL, 0) | O_NONBLOCK);
+
 	struct epoll_event event;
 	event.events = EPOLLIN; // Edge-triggered mode
 	event.data.fd = new_socket;
+
+	http_clients[event.data.fd] = create_http_client(epoll_fd, event.data.fd);
+
+	fcntl(new_socket, F_SETFL, fcntl(new_socket, F_GETFL, 0) | O_NONBLOCK);
+
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &event) == -1) {
 		perror("epoll_ctl");
 		close(new_socket);
+		free_http_client(http_clients[event.data.fd]);
 	}
 
-	http_clients[event.data.fd] = create_http_client(epoll_fd, event.data.fd);
 }
 
 void handle_client_disconnect(int epoll_fd, int client_fd)
@@ -84,7 +89,10 @@ void handle_client_disconnect(int epoll_fd, int client_fd)
 		perror("epoll_ctl");
 	}
 	close(client_fd);
-	free_http_client(http_clients[client_fd]);
+	if (http_clients[client_fd]) {
+		free_http_client(http_clients[client_fd]);
+		http_clients[client_fd] = NULL;
+	}
 }
 
 void handle_client_data(int epoll_fd, int client_fd, char *client_data_buffer, int thread_id)
@@ -103,8 +111,6 @@ void handle_client_data(int epoll_fd, int client_fd, char *client_data_buffer, i
 
 		// Remove the client socket from the epoll event list
 		handle_client_disconnect(epoll_fd, client_fd); // Handle client disconnection
-		http_clients[client_fd] = NULL;
-		//break;
 		return;
 	}
 
@@ -115,10 +121,13 @@ void handle_client_data(int epoll_fd, int client_fd, char *client_data_buffer, i
 	ret = llhttp_execute(&(client->parser), client_data_buffer, bytes_received);
 	if (ret != HPE_OK) {
 		fprintf(stderr, "Parse error: %s %s\n", llhttp_errno_name(ret), client->parser.reason);
+		fprintf(stderr, "%s\n", client_data_buffer);
+		close(client_fd);
+		free_http_client(client);
 	}
 }
 
-void *conn_wait(void *arg)
+static void *conn_wait(void *arg)
 {
 	struct thread_param *param = (struct thread_param*)arg;
 	int server_fd = param->server_fd;
@@ -128,6 +137,7 @@ void *conn_wait(void *arg)
 	int epoll_fd, event_count;
 	struct epoll_event event;
 	struct epoll_event *events = (struct epoll_event*)malloc(sizeof(struct epoll_event) * MAX_EVENTS);
+	assert(events != NULL);
 
 	int err = rados_ioctx_create(cluster, BUCKET_POOL, &bucket_io_ctx);
 	if (err < 0) {
@@ -162,7 +172,8 @@ void *conn_wait(void *arg)
 		memset(events, 0, sizeof(struct epoll_event) * MAX_EVENTS);
 		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 		if (event_count == -1) {
-			if (errno == EINTR || errno == EINTR) {
+			if (errno == EINTR) {
+				printf("EINTR\n");
 				continue;
 			}
 			else {
@@ -173,7 +184,6 @@ void *conn_wait(void *arg)
 
 		for (int i = 0; i < event_count; i++) {
 			// Handle events using callback functions
-			printf("event count %d/%d\n", i, event_count);
 			if (events[i].data.fd == server_fd) {
 				handle_new_connection(epoll_fd, server_fd, thread_id);
 			}
@@ -210,7 +220,7 @@ int main(int argc, char *argv[])
 	int server_fd;
 
 	//long nproc = sysconf(_SC_NPROCESSORS_ONLN);
-	long nproc = 1;
+	long nproc = 2;
 	pthread_t threads[nproc];
 	struct thread_param param[nproc];
 
@@ -254,7 +264,7 @@ int main(int argc, char *argv[])
 	}
 
 	// Listen for incoming connections
-	if (listen(server_fd, 32) == -1) {
+	if (listen(server_fd, 100) == -1) {
 		perror("listen");
 		exit(EXIT_FAILURE);
 	}
@@ -274,8 +284,6 @@ int main(int argc, char *argv[])
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGUSR1, &sa, NULL);
 
-	random_buffer = malloc(BUF_SIZE);
-
 	printf("Server is listening on port %d with %ld threads\n", PORT, nproc);
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
@@ -287,7 +295,7 @@ int main(int argc, char *argv[])
 		pthread_attr_setsigmask_np(&attr, &sigmask);
 		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
 
-		if (pthread_create(&threads[i], &attr, conn_wait, &param[i]) != 0) {
+		if (pthread_create(&threads[i], &attr, &conn_wait, &param[i]) != 0) {
 			fprintf(stderr, "fail to create thread %d\n", i);
 			exit(1);
 		}
@@ -309,12 +317,13 @@ int main(int argc, char *argv[])
 	}
 
 	for (size_t i = 0; i < MAX_HTTP_CLIENTS; i++) {
-		if (http_clients[i] != NULL) free_http_client(http_clients[i]);
+		if (http_clients[i] != NULL) {
+			free_http_client(http_clients[i]);
+			http_clients[i] = NULL;
+		}
 	}
 
 
-	//free(client_data_buffer);
-	free(random_buffer);
 	close(server_fd);
 	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);

@@ -417,10 +417,10 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 		char *continue_from = NULL;
 		char *prefix = NULL;
 
-		client->read_op = rados_create_read_op();
-		rados_read_op_assert_exists(client->read_op);
-		rados_read_op_omap_get_vals2(client->read_op, prefix, continue_from, 5000, &iter, &pmore, &prval);
-		ret = rados_read_op_operate(client->read_op, *(client->bucket_io_ctx), client->bucket_name, 0);
+		rados_read_op_t read_op = rados_create_read_op();
+		rados_read_op_assert_exists(read_op);
+		rados_read_op_omap_get_vals2(read_op, prefix, continue_from, 5000, &iter, &pmore, &prval);
+		ret = rados_read_op_operate(read_op, *(client->bucket_io_ctx), client->bucket_name, 0);
 
 		if (ret != 0 || prval != 0) {
 			// 404
@@ -562,12 +562,11 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 		}
 		if (prefix) free(prefix);
 		if (continue_from) free(continue_from);
-		rados_release_read_op(client->read_op);
+		rados_release_read_op(read_op);
 
 		//send_response(client);
 		printf("response: %ld %ld\ndata: %ld %ld\n", strlen(client->response), client->response_size, strlen(client->data_payload), client->data_payload_size);
-		send(client->fd, client->response, client->response_size, 0);
-		send(client->fd, client->data_payload, client->data_payload_size, 0);
+		send_response(client);
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
 	}

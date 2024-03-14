@@ -57,7 +57,7 @@ set_target_properties(http_server PROPERTIES
         POSITION_INDEPENDENT_CODE ON
         C_STANDARD 11)
 target_compile_options(http_server PRIVATE
-        -O3 -Wall -g)
+        -Wall -Wextra -ggdb -O2 -g)
 
 # build driver application
 add_executable(server.out src/server.c)
@@ -70,7 +70,7 @@ target_link_libraries(server.out PUBLIC
 set_target_properties(server.out PROPERTIES
     C_STANDARD 11)
 target_compile_options(server.out PRIVATE
-    -O3 -Wall -g)
+    -O2 -Wall -g)
 
 ## install binary, library, and public header
 #install(TARGETS s3_benchmark.out DESTINATION bin)
