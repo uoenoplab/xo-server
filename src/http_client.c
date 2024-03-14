@@ -8,17 +8,10 @@
 #include "http_client.h"
 #include "object_store.h"
 
-rados_t cluster;
-_Thread_local rados_ioctx_t bucket_io_ctx;
-_Thread_local rados_ioctx_t data_io_ctx;
-
-__thread struct http_client *http_clients[MAX_HTTP_CLIENTS] = { NULL };
 size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 4;
 
-void send_client_data(int client_fd)
+void send_client_data(struct http_client *client)
 {
-	struct http_client *client = http_clients[client_fd];
-
 	struct iovec iov[2];
 	size_t iov_count = 0;
 
@@ -55,7 +48,7 @@ void send_client_data(int client_fd)
 
 	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
 		struct epoll_event event = {};
-		event.data.fd = client->fd;
+		event.data.ptr = client;
 		event.events = EPOLLIN;
 		epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 		reset_http_client(client);
@@ -65,53 +58,60 @@ void send_client_data(int client_fd)
 void reset_http_client(struct http_client *client)
 {
 	for (size_t i = 0; i < client->num_fields; i++) {
-		free(client->header_fields[i]);
-		free(client->header_values[i]);
+		if (client->header_fields[i]) free(client->header_fields[i]);
+		if (client->header_values[i]) free(client->header_values[i]);
 	}
 
 	client->num_fields = 0;
 	client->expect = NONE;
 
-	if (client->uri_str) free(client->uri_str);
-	client->uri_str = NULL;
+	client->uri_str_len = 0;
 
-	if (client->object_name) free(client->object_name);
-	client->object_name = NULL;
+	if (client->object_name) {
+		free(client->object_name);
+		client->object_name = NULL;
+	}
 
-	if (client->bucket_name) free(client->bucket_name);
-	client->bucket_name = NULL;
+	if (client->bucket_name) {
+		free(client->bucket_name);
+		client->bucket_name = NULL;
+	}
 
-	if (client->put_buf) free(client->put_buf);
-	client->put_buf = NULL;
+	if (client->put_buf)  {
+		free(client->put_buf);
+		client->put_buf = NULL;
+		client->object_offset = 0;
+	}
 
-	if (client->response) free(client->response);
-	client->response = NULL;
-	client->response_size = 0;
-	client->response_sent = 0;
+	if (client->response) {
+		free(client->response);
+		client->response = NULL;
+		client->response_size = 0;
+		client->response_sent = 0;
+	}
 
-	if (client->data_payload) free(client->data_payload);
-	client->data_payload = NULL;
-	client->data_payload_size = 0;
-	client->data_payload_sent = 0;
+	if (client->data_payload) {
+		free(client->data_payload);
+		client->data_payload = NULL;
+		client->data_payload_size = 0;
+		client->data_payload_sent = 0;
+	}
 
 	client->prval = 0;
-
-	client->bucket_name = NULL;
-	client->chunked_upload = false;
 	client->object_size = 0;
-	client->object_offset = 0;
-	client->http_payload_size = 0;
 	client->parsing = false;
 	client->deleting = false;
-
-	client->current_chunk_size = 0;
-	client->current_chunk_offset = 0;
+	client->chunked_upload = false;
 }
 
 void free_http_client(struct http_client *client)
 {
 	llhttp_finish(&(client->parser));
 	reset_http_client(client);
+
+	free(client->header_fields);
+	free(client->header_values);
+	free(client->uri_str);
 
 	rados_aio_release(client->aio_head_read_completion);
 	rados_aio_release(client->aio_completion);
@@ -147,10 +147,7 @@ int on_body_cb(llhttp_t *parser, const char *at, size_t length)
 {
 	struct http_client *client = (struct http_client*)parser->data;
 	if (client->method == HTTP_PUT) {
-		struct timespec t0, t1;
-		clock_gettime(CLOCK_MONOTONIC, &t0);
 		put_object(client, at, length);
-		clock_gettime(CLOCK_MONOTONIC, &t1);
 	}
 	else if (client->method == HTTP_POST) {
 		if (client->deleting == true) {
@@ -163,28 +160,34 @@ int on_body_cb(llhttp_t *parser, const char *at, size_t length)
 
 int on_url_cb(llhttp_t *parser, const char *at, size_t length)
 {
-	const char * errorPos;
 	struct http_client *client = (struct http_client*)parser->data;
-//	if (client->uri_str) { free(client->uri_str); client->uri_str = NULL; }
-	client->uri_str = strndup(at, length);
 
-	if (uriParseSingleUriA(&(client->uri), client->uri_str, &errorPos) != URI_SUCCESS) {
-		fprintf(stderr, "Parse uri fail: %s\n", errorPos);
-		return -1;
-	}
+	client->uri_str = realloc(client->uri_str, (client->uri_str_len + length));
+	memcpy(&(client->uri_str[client->uri_str_len]), at, length);
+	client->uri_str_len += length;
 
 	return 0;
 }
 
 int on_url_complete_cb(llhttp_t* parser)
 {
+	const char * errorPos;
 	struct http_client *client = (struct http_client*)parser->data;
+	int ret = -1;
+
+	client->uri_str = realloc(client->uri_str, (client->uri_str_len + 1));
+	client->uri_str[client->uri_str_len] = 0;
+	if ((ret = uriParseSingleUriA(&(client->uri), client->uri_str, &errorPos)) != URI_SUCCESS) {
+		fprintf(stderr, "Parse uri fail: %s\n", errorPos);
+		return -1;
+	}
 
 	if (client->uri.pathHead != NULL) {
 		size_t bucket_name_len = client->uri.pathHead->text.afterLast - client->uri.pathHead->text.first;
 		if (bucket_name_len > 0) {
+			printf("%s\n", client->uri_str);
 			client->bucket_name = strndup(client->uri.pathHead->text.first, bucket_name_len);
-			unescapeHtml(client->bucket_name);
+			//unescapeHtml(client->bucket_name);
 
 			if (client->uri.pathHead->next != NULL && client->uri.pathHead->next->text.afterLast - client->uri.pathHead->next->text.first > 0) {
 				// calculate total length
@@ -208,12 +211,15 @@ int on_url_complete_cb(llhttp_t* parser)
 						*(client->object_name + off++) = '/';
 					}
 					*(client->object_name + object_name_len - 1) = 0;
-					unescapeHtml(client->object_name);
+					//unescapeHtml(client->object_name);
 				}
 			}
 		}
-		uriFreeUriMembersA(&(client->uri));
+		//uriFreeUriMembersA(&(client->uri));
 	}
+
+//	if (ret == URI_SUCCESS)
+//		uriFreeUriMembersA(&(client->uri));
 
 	return 0;
 }
@@ -262,7 +268,7 @@ int on_message_complete_cb(llhttp_t* parser)
 void send_response(struct http_client *client)
 {
 	struct epoll_event event = {};
-	event.data.fd = client->fd;
+	event.data.ptr = client;
 	event.events = EPOLLOUT;
 	epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 }
@@ -284,7 +290,7 @@ int on_reset_cb(llhttp_t *parser)
 	return 0;
 }
 
-struct http_client *create_http_client(int epoll_fd, int fd)
+struct http_client *create_http_client(int epoll_fd, int fd, rados_ioctx_t *bucket_io_ctx, rados_ioctx_t *data_io_ctx)
 {
 	struct http_client *client = (struct http_client*)calloc(1, sizeof(struct http_client));
 
@@ -305,15 +311,17 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	client->epoll_fd = epoll_fd;
 	client->fd = fd;
 	client->parser.data = client;
-	client->outstanding_aio_count = 0;
 
-	client->bucket_io_ctx = &bucket_io_ctx;
-	client->data_io_ctx = &data_io_ctx;
+	client->uri_str = malloc(0);
+	client->header_fields = (char**)malloc(sizeof(char*) * MAX_FIELDS);
+	client->header_values = (char**)malloc(sizeof(char*) * MAX_FIELDS);
+
+	client->bucket_io_ctx = bucket_io_ctx;
+	client->data_io_ctx = data_io_ctx;
 
 	client->prval = 0;
-
 	client->write_op = rados_create_write_op();
-	client->read_op = rados_create_write_op();
+	client->read_op = rados_create_read_op();
 
 	rados_aio_create_completion((void*)client, aio_ack_callback, aio_commit_callback, &(client->aio_completion));
 	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_head_read_completion));

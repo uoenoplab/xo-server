@@ -36,6 +36,7 @@
 // 5.1 wait for async completion, respond http OK
 
 volatile sig_atomic_t server_running = 1;
+rados_t cluster;
 
 struct thread_param {
 	int server_fd;
@@ -47,7 +48,7 @@ void handleCtrlC(int signum) {
 	server_running = 0; // Set the flag to stop the server gracefully.
 }
 
-void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
+void handle_new_connection(int epoll_fd, int server_fd, int thread_id, rados_ioctx_t *bucket_io_ctx, rados_ioctx_t *data_io_ctx)
 {
 	pid_t tid = gettid();
 
@@ -68,72 +69,72 @@ void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
 
 	struct epoll_event event;
 	event.events = EPOLLIN; // Edge-triggered mode
-	event.data.fd = new_socket;
-
-	http_clients[event.data.fd] = create_http_client(epoll_fd, event.data.fd);
+	struct http_client *client = create_http_client(epoll_fd, new_socket, bucket_io_ctx, data_io_ctx);
+	event.data.ptr = client;
 
 	fcntl(new_socket, F_SETFL, fcntl(new_socket, F_GETFL, 0) | O_NONBLOCK);
 
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &event) == -1) {
 		perror("epoll_ctl");
 		close(new_socket);
-		free_http_client(http_clients[event.data.fd]);
+		free_http_client(client);
 	}
-
 }
 
-void handle_client_disconnect(int epoll_fd, int client_fd)
+void handle_client_disconnect(int epoll_fd, struct http_client *client)
 {
+	int fd = client->fd;
 	// Remove the client socket from the epoll event list
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL) == -1) {
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL) == -1) {
 		perror("epoll_ctl");
 	}
-	close(client_fd);
-	if (http_clients[client_fd]) {
-		free_http_client(http_clients[client_fd]);
-		http_clients[client_fd] = NULL;
-	}
+	close(fd);
+	free_http_client(client);
 }
 
-void handle_client_data(int epoll_fd, int client_fd, char *client_data_buffer, int thread_id)
+void handle_client_data(int epoll_fd, struct http_client *client, char *client_data_buffer, int thread_id)
 {
 	ssize_t bytes_received;
 
 	memset(client_data_buffer, 0, BUF_SIZE);
-	bytes_received = recv(client_fd, client_data_buffer, BUF_SIZE, 0);
+	bytes_received = recv(client->fd, client_data_buffer, BUF_SIZE, 0);
 	if (bytes_received <= 0) {
 		// Client closed the connection or an error occurred
 		if (bytes_received == 0) {
-			printf("Thread %d: Client disconnected: %d\n", thread_id, client_fd);
+			printf("Thread %d: Client disconnected: %d\n", thread_id, client->fd);
 		} else {
 			perror("recv");
 		}
 
 		// Remove the client socket from the epoll event list
-		handle_client_disconnect(epoll_fd, client_fd); // Handle client disconnection
+		handle_client_disconnect(epoll_fd, client); // Handle client disconnection
 		return;
 	}
 
-	struct http_client *client = http_clients[client_fd];
 	enum llhttp_errno ret;
 
 	// Echo the received data back to the client
+	printf("client buf: %.24s\n", client_data_buffer);
 	ret = llhttp_execute(&(client->parser), client_data_buffer, bytes_received);
 	if (ret != HPE_OK) {
 		fprintf(stderr, "Parse error: %s %s\n", llhttp_errno_name(ret), client->parser.reason);
 		fprintf(stderr, "%s\n", client_data_buffer);
-		close(client_fd);
+		close(client->fd);
 		free_http_client(client);
 	}
 }
 
 static void *conn_wait(void *arg)
 {
+	rados_ioctx_t bucket_io_ctx;
+	rados_ioctx_t data_io_ctx;
+
 	struct thread_param *param = (struct thread_param*)arg;
 	int server_fd = param->server_fd;
 	int thread_id = param->thread_id;
 
 	char *client_data_buffer = malloc(BUF_SIZE);
+
 	int epoll_fd, event_count;
 	struct epoll_event event;
 	struct epoll_event *events = (struct epoll_event*)malloc(sizeof(struct epoll_event) * MAX_EVENTS);
@@ -161,7 +162,9 @@ static void *conn_wait(void *arg)
 
 	// Add the server socket to the epoll event list
 	event.events = EPOLLIN;
-	event.data.fd = server_fd;
+	struct http_client *server_client = create_http_client(server_fd, server_fd, NULL, NULL);
+	event.data.ptr = server_client;
+
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
 		perror("epoll_ctl");
 		exit(EXIT_FAILURE);
@@ -169,7 +172,7 @@ static void *conn_wait(void *arg)
 
 	while (server_running) {
 		// Wait for events using epoll
-		memset(events, 0, sizeof(struct epoll_event) * MAX_EVENTS);
+		//memset(events, 0, sizeof(struct epoll_event) * MAX_EVENTS);
 		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 		if (event_count == -1) {
 			if (errno == EINTR) {
@@ -184,24 +187,23 @@ static void *conn_wait(void *arg)
 
 		for (int i = 0; i < event_count; i++) {
 			// Handle events using callback functions
-			if (events[i].data.fd == server_fd) {
-				handle_new_connection(epoll_fd, server_fd, thread_id);
+			struct http_client *c = (struct http_client*)events[i].data.ptr;
+			if (c->fd == server_fd) {
+				handle_new_connection(epoll_fd, server_fd, thread_id, &bucket_io_ctx, &data_io_ctx);
 			}
 			else if (events[i].events & EPOLLOUT) {
-				send_client_data(events[i].data.fd);
+				send_client_data(c);
 			}
 			else if (events[i].events & EPOLLIN) {
-				//struct timespec t0, t1;
-				//clock_gettime(CLOCK_MONOTONIC, &t0);
-				handle_client_data(epoll_fd, events[i].data.fd, client_data_buffer, thread_id);
-				//clock_gettime(CLOCK_MONOTONIC, &t1);
-				//printf("handle_client_data:\t%f s\n", elapsed_time(t1, t0));
+				handle_client_data(epoll_fd, c, client_data_buffer, thread_id);
 			}
 		}
 	}
 
-	free(client_data_buffer);
 	close(epoll_fd);
+
+	free(client_data_buffer);
+	free_http_client(server_client);
 	free(events);
 
 	rados_ioctx_destroy(bucket_io_ctx);
@@ -220,7 +222,7 @@ int main(int argc, char *argv[])
 	int server_fd;
 
 	//long nproc = sysconf(_SC_NPROCESSORS_ONLN);
-	long nproc = 2;
+	long nproc = 1;
 	pthread_t threads[nproc];
 	struct thread_param param[nproc];
 
@@ -303,6 +305,7 @@ int main(int argc, char *argv[])
 
 	// block until SIGINT
 	pause();
+	//conn_wait(&param[0]);
 
 	for (int i = 0; i < nproc; i++) {
 		if (pthread_kill(threads[i], SIGUSR1) != 0) {
@@ -315,14 +318,6 @@ int main(int argc, char *argv[])
 			exit(1);
 		}
 	}
-
-	for (size_t i = 0; i < MAX_HTTP_CLIENTS; i++) {
-		if (http_clients[i] != NULL) {
-			free_http_client(http_clients[i]);
-			http_clients[i] = NULL;
-		}
-	}
-
 
 	close(server_fd);
 	rados_shutdown(cluster);

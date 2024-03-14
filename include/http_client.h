@@ -19,7 +19,6 @@
 enum http_expect { CONTINUE, NONE };
 
 extern size_t BUF_SIZE;
-extern char *random_buffer;
 
 static char *HTTP_OK_HDR = (char *)"HTTP/1.1 200 OK\r\n"
 		 "Connection: keep-alive\r\n"
@@ -38,7 +37,6 @@ struct http_client {
 	int fd;
 
 	char *put_buf;
-	size_t outstanding_aio_count;
 
 	int prval;
 	rados_xattrs_iter_t iter;
@@ -67,10 +65,13 @@ struct http_client {
 	char *full_object_name;
 
 	char *uri_str;
+	size_t uri_str_len;
 	UriUriA uri;
 
-	char *header_fields[MAX_FIELDS];
-	char *header_values[MAX_FIELDS];
+	//char *header_fields[MAX_FIELDS];
+	//char *header_values[MAX_FIELDS];
+	char **header_fields;
+	char **header_values;
 	size_t num_fields;
 
 	rados_ioctx_t *bucket_io_ctx;
@@ -91,13 +92,7 @@ struct http_client {
 	xmlParserCtxtPtr xml_ctx;
 };
 
-extern __thread struct http_client *http_clients[MAX_HTTP_CLIENTS];
-
-extern rados_t cluster;
-extern _Thread_local rados_ioctx_t bucket_io_ctx;
-extern _Thread_local rados_ioctx_t data_io_ctx;
-
-struct http_client *create_http_client(int epoll_fd, int fd);
+struct http_client *create_http_client(int epoll_fd, int fd, rados_ioctx_t *bucket_io_ctx, rados_ioctx_t *data_io_ctx);
 void reset_http_client(struct http_client *client);
 void free_http_client(struct http_client *client);
 
@@ -111,7 +106,7 @@ int on_chunk_header(llhttp_t *parser);
 int on_message_complete_cb(llhttp_t* parser);
 int on_reset_cb(llhttp_t *parser);
 
-void send_client_data(int client_fd);
+void send_client_data(struct http_client *client);
 void send_response(struct http_client *client);
 void aio_ack_callback(rados_completion_t comp, void *arg);
 void aio_commit_callback(rados_completion_t comp, void *arg);

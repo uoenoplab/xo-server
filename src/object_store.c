@@ -15,11 +15,9 @@ void delete_objects(struct http_client *client, const char *buf, size_t length)
 
 void put_object(struct http_client *client, const char *buf, size_t length)
 {
-	char *ptr = (char*)buf;
-
 	if (!client->chunked_upload && client->object_name != NULL) {
-		memcpy(&client->put_buf[client->object_offset], ptr, length);
-		updateRollingMD5(&(client->md5_ctx), ptr, length);
+		memcpy(&(client->put_buf[client->object_offset]), buf, length);
+		updateRollingMD5(&(client->md5_ctx), buf, length);
 
 		client->object_offset += length;
 	}
@@ -104,10 +102,11 @@ void init_object_get_request(struct http_client *client)
 	if (client->bucket_name != NULL && client->object_name != NULL) {
 		client->data_payload = malloc(FIRST_READ_SIZE);
 
-		rados_release_read_op(client->read_op);
-		client->read_op = rados_create_read_op();
 		rados_aio_release(client->aio_head_read_completion);
 		rados_aio_create_completion((void*)client, aio_head_read_callback, NULL, &(client->aio_head_read_completion));
+
+		rados_release_read_op(client->read_op);
+		client->read_op = rados_create_read_op();
 
 		rados_read_op_assert_exists(client->read_op);
 		rados_read_op_getxattrs(client->read_op, &(client->iter), &(client->prval));
@@ -175,8 +174,8 @@ void complete_post_request(struct http_client *client, const char *datetime_str)
 
 			rados_release_write_op(client->write_op);
 			client->write_op = rados_create_write_op();
-			char *keys[num_objects];
-			size_t keys_len[num_objects];
+			char **keys = malloc(sizeof(char*) * num_objects);
+			size_t *keys_len = malloc(sizeof(size_t) * num_objects);
 
 			for (ptr = node, i = 0; ptr != NULL; ptr = ptr->next) {
 				if (strcmp((const char*)ptr->name, "Object") == 0) {
@@ -205,7 +204,7 @@ void complete_post_request(struct http_client *client, const char *datetime_str)
 
 			// dump XML document
 			xmlDocDumpMemoryEnc(response_doc, &xmlbuf, &xmlbuf_size, "UTF-8");
-			client->data_payload = malloc(xmlbuf_size);
+			client->data_payload = malloc(xmlbuf_size + 1);
 			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
 			client->data_payload_size = xmlbuf_size;
 
@@ -218,6 +217,8 @@ void complete_post_request(struct http_client *client, const char *datetime_str)
 			xmlFree(xmlbuf);
 
 			for (size_t j = 0; j < i; j++) free(keys[j]);
+			free(keys);
+			free(keys_len);
 		}
 		else {
 			xmlbuf_size = 0;
@@ -232,9 +233,9 @@ void complete_post_request(struct http_client *client, const char *datetime_str)
 
 		client->deleting = false;
 
-		//send_response(client);
-		send(client->fd, client->response, client->response_size, 0);
-		send(client->fd, client->data_payload, client->data_payload_size, 0);
+		send_response(client);
+		//send(client->fd, client->response, client->response_size, 0);
+		//send(client->fd, client->data_payload, client->data_payload_size, 0);
 	}
 }
 
@@ -549,7 +550,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 			snprintf(client->response, client->response_size, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, xmlbuf_size, datetime_str);
 			client->response_size--; // we don't send the null
 
-			client->data_payload = malloc(xmlbuf_size);
+			client->data_payload = malloc(xmlbuf_size + 1);
 			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
 			client->data_payload_size = xmlbuf_size;
 
@@ -593,7 +594,7 @@ void init_object_put_request(struct http_client *client) {
 	}
 
 	if (client->object_name != NULL) {
-		client->put_buf = malloc(client->object_size);
+		client->put_buf = malloc(client->object_size + 1);
 		initRollingMD5(&(client->md5_ctx));
 		size_t obj_size_str_len = snprintf(NULL, 0, "%ld", client->object_size) + 1;
 		char *obj_size_str = malloc(obj_size_str_len);
