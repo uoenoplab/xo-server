@@ -186,8 +186,12 @@ void complete_post_request(struct http_client *client, const char *datetime_str)
 						keys[i] = strdup((const char*)content);
 						keys_len[i] = strlen((const char*)content);
 
-						int ret = rados_remove(*(client->data_io_ctx), (const char*)content);
-						if (ret) { perror("rados_remove"); printf("%ld/%ld deleting %s %ld\n", i, num_objects, content, keys_len[i]); }
+						//int ret = rados_remove(*(client->data_io_ctx), (const char*)content);
+						rados_write_op_t write_op = rados_create_write_op();
+						rados_write_op_remove(write_op);
+						ret = rados_write_op_operate(write_op, *(client->data_io_ctx), content, NULL, 0);
+						if (ret) { perror("rados_remove"); printf("ret=%d %ld/%ld deleting %s %ld\n", ret, i, num_objects, content, keys_len[i]); }
+						rados_release_write_op(write_op);
 
 						response_node = xmlNewChild(response_root_node, NULL, BAD_CAST "Deleted", NULL);
 						response_node = xmlNewChild(response_node, NULL, BAD_CAST "Key", content);
@@ -309,26 +313,30 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 	}
 	else if (client->bucket_name != NULL && client->object_name != NULL) {
 		// delete object
-		ret = rados_remove(*(client->data_io_ctx), client->object_name);
+		rados_write_op_t write_op = rados_create_write_op();
+		rados_write_op_remove(write_op);
+		//ret = rados_remove(*(client->data_io_ctx), client->object_name);
+		ret = rados_write_op_operate2(write_op, *(client->data_io_ctx), client->object_name, NULL, 0);
 		assert(ret == 0);
+		rados_release_write_op(write_op);
 
-		const char *key = client->object_name; const size_t keys_len[] = { strlen(key) };
-		rados_release_write_op(client->write_op);
-		client->write_op = rados_create_write_op();
-		rados_write_op_omap_rm_keys2(client->write_op, &key, keys_len, 1);
-		ret = rados_write_op_operate2(client->write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
+		const size_t key_len = strlen(client->object_name);
+		write_op = rados_create_write_op();
+		rados_write_op_omap_rm_keys2(write_op, &(client->object_name), &key_len, 1);
+		ret = rados_write_op_operate2(write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
 		assert(ret == 0);
+		rados_release_write_op(write_op);
 
 		client->response_size = snprintf(NULL, 0, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
 		client->response = malloc(client->response_size);
 		snprintf(client->response, client->response_size, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str);
+		client->response_size--;
 
 		client->data_payload = NULL;
 		client->data_payload_size = 0;
 
 		send_response(client);
 	}
-
 }
 
 void complete_put_request(struct http_client *client, const char *datetime_str)
@@ -448,6 +456,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 			UriUriA uri;
 			char errorPos;
 
+			char *url = strdup(client->uri_str);
 			if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
 				fprintf(stderr, "Parse uri fail: %s\n", errorPos);
 				return -1;
@@ -483,8 +492,9 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 				uriFreeQueryListA(queryList);
 			}
 
-			if (ret == URI_SUCCESS)
-				uriFreeUriMembersA(&uri);
+			free(url);
+			//if (ret == URI_SUCCESS)
+			//	uriFreeUriMembersA(&uri);
 
 			// return list inside bucket
 			//if (fetch_owner && list_type == 2) {

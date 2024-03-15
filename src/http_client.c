@@ -88,7 +88,7 @@ void reset_http_client(struct http_client *client)
 		client->response_sent = 0;
 	}
 
-	if (client->data_payload) {
+	if (client->data_payload != NULL) {
 		free(client->data_payload);
 		client->data_payload = NULL;
 		client->data_payload_size = 0;
@@ -173,58 +173,81 @@ static int on_url_cb(llhttp_t *parser, const char *at, size_t length)
 
 static int on_url_complete_cb(llhttp_t* parser)
 {
-	const char * errorPos;
+//	struct http_client *client = (struct http_client*)parser->data;
+//
+//	char errorPos;
+//	int ret;
+//	UriUriA uri;
+//
+//	client->uri_str[client->uri_str_len] = 0;
+//	if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
+//		 fprintf(stderr, "Parse uri fail: %s\n", errorPos);
+//		 return -1;
+//	}
+//
+//	if (uri.pathHead != NULL) {
+//		size_t bucket_name_len = uri.pathHead->text.afterLast - uri.pathHead->text.first;
+//		if (bucket_name_len > 0) {
+//			client->bucket_name = malloc(bucket_name_len + 1);
+//			memcpy(client->bucket_name, uri.pathHead->text.first, bucket_name_len);
+//			client->bucket_name[bucket_name_len] = 0;
+//			unescapeHtml(client->bucket_name);
+//
+//			if (uri.pathHead->next != NULL && uri.pathHead->next->text.afterLast - uri.pathHead->next->text.first > 0) {
+//				// calculate total length
+//				size_t object_name_len = 0;
+//				size_t num_segments = 0;
+//				size_t off = 0;
+//				UriPathSegmentA *segment;
+//
+//				for (segment = uri.pathHead->next, num_segments = 0; segment != NULL; segment = segment->next, num_segments++) {
+//					object_name_len += segment->text.afterLast - segment->text.first;
+//				}
+//
+//				// object scope exists
+//				if (num_segments > 0) {
+//					object_name_len += num_segments;
+//					client->object_name = malloc(sizeof(char) * object_name_len + 1);
+//					for (segment = uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
+//						size_t len = segment->text.afterLast - segment->text.first;
+//						memcpy(client->object_name + off, segment->text.first, len);
+//						off += len;
+//						*(client->object_name + off++) = '/';
+//					}
+//					*(client->object_name + object_name_len - 1) = 0;
+//				//unescapeHtml(client->object_name);
+//				}
+//			}
+//		}
+//	}
+
 	struct http_client *client = (struct http_client*)parser->data;
-	int ret = -1;
 
-	UriUriA uri;
-	//client->uri_str = realloc(client->uri_str, (client->uri_str_len + 1));
-	//assert(client->uri_str != NULL);
 	client->uri_str[client->uri_str_len] = 0;
-	//printf("to parse uri %d-%d %s\n", client->uri_str_len, strlen(client->uri_str), client->uri_str);
-	if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
-		fprintf(stderr, "Parse uri fail: %s\n", errorPos);
-		return -1;
-	}
+	char *url = strdup(client->uri_str);
+	char *token = strtok(url, "/");
 
-	if (uri.pathHead != NULL) {
-		size_t bucket_name_len = uri.pathHead->text.afterLast - uri.pathHead->text.first;
-		if (bucket_name_len > 0) {
-			client->bucket_name = malloc(bucket_name_len + 1);
-			memcpy(client->bucket_name, uri.pathHead->text.first, bucket_name_len);
-			client->bucket_name[bucket_name_len] = 0;
-			//unescapeHtml(client->bucket_name);
+	if (token != NULL) {
+		client->bucket_name = malloc(strlen(token) + 1);
+		memcpy(client->bucket_name, token, strlen(token));
+		client->bucket_name[strlen(token)] = 0;
 
-			if (uri.pathHead->next != NULL && uri.pathHead->next->text.afterLast - uri.pathHead->next->text.first > 0) {
-				// calculate total length
-				size_t object_name_len = 0;
-				size_t num_segments = 0;
-				size_t off = 0;
-				UriPathSegmentA *segment;
-
-				for (segment = uri.pathHead->next, num_segments = 0; segment != NULL; segment = segment->next, num_segments++) {
-					object_name_len += segment->text.afterLast - segment->text.first;
-				}
-
-				// object scope exists
-				if (num_segments > 0) {
-					object_name_len += num_segments;
-					client->object_name = malloc(sizeof(char) * object_name_len);
-					for (segment = uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
-						size_t len = segment->text.afterLast - segment->text.first;
-						strncpy(client->object_name + off, segment->text.first, len);
-						off += len;
-						*(client->object_name + off++) = '/';
-					}
-					*(client->object_name + object_name_len - 1) = 0;
-					//unescapeHtml(client->object_name);
-				}
-			}
+		token = strtok(NULL, "/");
+		if (token != NULL) {
+			client->object_name = malloc(strlen(token) + 1);
+			memcpy(client->object_name, token, strlen(token));
+			client->object_name[strlen(token)] = 0;
+		}
+		else {
+			client->object_name = NULL;
 		}
 	}
+	else {
+		client->bucket_name = NULL;
+		client->object_name = NULL;
+	}
 
-	if (ret == URI_SUCCESS)
-		uriFreeUriMembersA(&uri);
+	free(url);
 
 	return 0;
 }
@@ -279,11 +302,11 @@ void send_response(struct http_client *client)
 }
 
 void aio_ack_callback(rados_completion_t comp, void *arg) {
-	struct http_client *client = (struct http_client*)arg;
-	send_response(client);
 }
 
 void aio_commit_callback(rados_completion_t comp, void *arg) {
+	struct http_client *client = (struct http_client*)arg;
+	send_response(client);
 }
 
 static int on_reset_cb(llhttp_t *parser)
@@ -311,7 +334,8 @@ static int on_headers_complete_cb(llhttp_t* parser)
 		char errorPos;
 		int ret = -1;
 
-		if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
+		char *url = strdup(client->uri_str);
+		if ((ret = uriParseSingleUriA(&uri, url, &errorPos)) != URI_SUCCESS) {
 			fprintf(stderr, "Parse uri fail: %c\n", errorPos);
 			return -1;
 		}
@@ -329,6 +353,7 @@ static int on_headers_complete_cb(llhttp_t* parser)
 
 		if (ret == URI_SUCCESS)
 			uriFreeUriMembersA(&uri);
+		free(url);
 	}
 
 	if (client->expect == CONTINUE) {
