@@ -38,7 +38,7 @@
 size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 4;
 
 volatile sig_atomic_t server_running = 1;
-rados_t cluster;
+volatile rados_t cluster;
 
 struct thread_param {
 	int server_fd;
@@ -119,9 +119,12 @@ void handle_client_data(int epoll_fd, struct http_client *client, char *client_d
 	ret = llhttp_execute(&(client->parser), client_data_buffer, bytes_received);
 	if (ret != HPE_OK) {
 		fprintf(stderr, "Parse error: %s %s\n", llhttp_errno_name(ret), client->parser.reason);
-		fprintf(stderr, "%s\n", client_data_buffer);
-		close(client->fd);
-		free_http_client(client);
+		fprintf(stderr, "buf: %s\n", client_data_buffer);
+		fprintf(stderr, "Error pos: %ld %ld %p %p\n", bytes_received, llhttp_get_error_pos(&(client->parser)) - client_data_buffer, client_data_buffer, llhttp_get_error_pos(&(client->parser)));
+		//handle_client_disconnect(epoll_fd, client); // Handle client disconnection
+		exit(1);
+		//close(client->fd);
+		//free_http_client(client);
 	}
 }
 
@@ -292,33 +295,33 @@ int main(int argc, char *argv[])
 		param[i].thread_id = i;
 		param[i].server_fd = server_fd;
 
-		CPU_ZERO(&cpus);
-		CPU_SET((i + 1) % nproc, &cpus);
-
-		pthread_attr_setsigmask_np(&attr, &sigmask);
-		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
-
-		if (pthread_create(&threads[i], &attr, &conn_wait, &param[i]) != 0) {
-			fprintf(stderr, "fail to create thread %d\n", i);
-			exit(1);
-		}
+//		CPU_ZERO(&cpus);
+//		CPU_SET((i + 1) % nproc, &cpus);
+//
+//		pthread_attr_setsigmask_np(&attr, &sigmask);
+//		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
+//
+//		if (pthread_create(&threads[i], &attr, &conn_wait, &param[i]) != 0) {
+//			fprintf(stderr, "fail to create thread %d\n", i);
+//			exit(1);
+//		}
 	}
 
 	// block until SIGINT
-	pause();
-	//conn_wait(&param[0]);
+	//pause();
+	conn_wait(&param[0]);
 
-	for (int i = 0; i < nproc; i++) {
-		if (pthread_kill(threads[i], SIGUSR1) != 0) {
-			fprintf(stderr, "fail to signal thread %d\n", i);
-			exit(1);
-		}
-
-		if (pthread_join(threads[i], NULL) != 0) {
-			fprintf(stderr, "fail to join thread %d\n", i);
-			exit(1);
-		}
-	}
+//	for (int i = 0; i < nproc; i++) {
+//		if (pthread_kill(threads[i], SIGUSR1) != 0) {
+//			fprintf(stderr, "fail to signal thread %d\n", i);
+//			exit(1);
+//		}
+//
+//		if (pthread_join(threads[i], NULL) != 0) {
+//			fprintf(stderr, "fail to join thread %d\n", i);
+//			exit(1);
+//		}
+//	}
 
 	close(server_fd);
 	rados_shutdown(cluster);
