@@ -295,33 +295,33 @@ int main(int argc, char *argv[])
 		param[i].thread_id = i;
 		param[i].server_fd = server_fd;
 
-//		CPU_ZERO(&cpus);
-//		CPU_SET((i + 1) % nproc, &cpus);
-//
-//		pthread_attr_setsigmask_np(&attr, &sigmask);
-//		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
-//
-//		if (pthread_create(&threads[i], &attr, &conn_wait, &param[i]) != 0) {
-//			fprintf(stderr, "fail to create thread %d\n", i);
-//			exit(1);
-//		}
+		CPU_ZERO(&cpus);
+		CPU_SET((i + 1) % nproc, &cpus);
+
+		pthread_attr_setsigmask_np(&attr, &sigmask);
+		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
+
+		if (pthread_create(&threads[i], &attr, &conn_wait, &param[i]) != 0) {
+			fprintf(stderr, "fail to create thread %d\n", i);
+			exit(1);
+		}
 	}
 
 	// block until SIGINT
-	//pause();
-	conn_wait(&param[0]);
+	pause();
+	//conn_wait(&param[0]);
 
-//	for (int i = 0; i < nproc; i++) {
-//		if (pthread_kill(threads[i], SIGUSR1) != 0) {
-//			fprintf(stderr, "fail to signal thread %d\n", i);
-//			exit(1);
-//		}
-//
-//		if (pthread_join(threads[i], NULL) != 0) {
-//			fprintf(stderr, "fail to join thread %d\n", i);
-//			exit(1);
-//		}
-//	}
+	for (int i = 0; i < nproc; i++) {
+		if (pthread_kill(threads[i], SIGUSR1) != 0) {
+			fprintf(stderr, "fail to signal thread %d\n", i);
+			exit(1);
+		}
+
+		if (pthread_join(threads[i], NULL) != 0) {
+			fprintf(stderr, "fail to join thread %d\n", i);
+			exit(1);
+		}
+	}
 
 	close(server_fd);
 	rados_shutdown(cluster);

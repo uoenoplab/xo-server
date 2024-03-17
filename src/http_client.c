@@ -52,97 +52,11 @@ void send_client_data(struct http_client *client)
 	}
 }
 
-void reset_http_client(struct http_client *client)
-{
-//	for (size_t i = 0; i < client->num_fields; i++) {
-//		if (client->header_fields[i]) free(client->header_fields[i]);
-//		if (client->header_values[i]) free(client->header_values[i]);
-//	}
-
-	client->num_fields = 0;
-	client->expect = NONE;
-
-	memset(client->uri_str, 0, 4096);
-	client->uri_str_len = 0;
-
-	memset(client->object_name, 0, 65536);
-//	if (client->object_name) {
-//		free(client->object_name);
-//		client->object_name = NULL;
-//	}
-
-	memset(client->bucket_name, 0, 65536);
-	//if (client->bucket_name) {
-	//	free(client->bucket_name);
-	//	client->bucket_name = NULL;
-	//}
-
-	memset(client->put_buf, 0, 1024*1024*4);
-	client->object_offset = 0;
-	//if (client->put_buf)  {
-	//	free(client->put_buf);
-	//	client->put_buf = NULL;
-	//	client->object_offset = 0;
-	//}
-
-	memset(client->response, 0, 65536);
-	client->response_size = 0;
-	client->response_sent = 0;
-	//if (client->response) {
-	//	free(client->response);
-	//	client->response = NULL;
-	//	client->response_size = 0;
-	//	client->response_sent = 0;
-	//}
-
-	//memset(client->data_payload, 0, 1024*1024*4);
-	//client->data_payload_size = 0;
-	//client->data_payload_sent = 0;
-	if (client->data_payload != NULL) {
-		free(client->data_payload);
-		client->data_payload = NULL;
-		client->data_payload_size = 0;
-		client->data_payload_sent = 0;
-	}
-
-	client->prval = 0;
-	client->object_size = 0;
-	client->parsing = false;
-	client->deleting = false;
-	client->chunked_upload = false;
-
-	client->header_field_parsed = 0;
-	client->header_value_parsed = 0;
-
-//	llhttp_finish(&(client->parser));
-//
-//	llhttp_settings_init(&(client->settings));
-//	llhttp_init(&(client->parser), HTTP_BOTH, &(client->settings));
-}
-
-void free_http_client(struct http_client *client)
-{
-	llhttp_finish(&(client->parser));
-	reset_http_client(client);
-
-//	free(client->header_fields);
-//	free(client->header_values);
-	//free(client->uri_str);
-
-	rados_aio_release(client->aio_head_read_completion);
-	rados_aio_release(client->aio_completion);
-
-	rados_release_read_op(client->read_op);
-	rados_release_write_op(client->write_op);
-
-	free(client);
-}
-
 static int on_header_field_cb(llhttp_t *parser, const char *at, size_t length)
 {
 	struct http_client *client = (struct http_client*)parser->data;
 	if (client->header_value_parsed > 0) {
-		client->header_fields[client->num_fields][client->header_field_parsed] = 0;
+		client->header_fields[client->num_fields][client->header_field_parsed] = '\0';
 		client->num_fields++;
 		client->header_field_parsed = 0;
 		client->header_value_parsed = 0;
@@ -158,7 +72,7 @@ static int on_header_value_cb(llhttp_t *parser, const char *at, size_t length)
 	struct http_client *client = (struct http_client*)parser->data;
 
 	if (client->header_value_parsed == 0)
-		client->header_fields[client->num_fields][client->header_field_parsed] = 0;
+		client->header_fields[client->num_fields][client->header_field_parsed] = '\0';
 
 	memcpy(&(client->header_values[client->num_fields][client->header_value_parsed]), at, length);
 	client->header_value_parsed += length;
@@ -185,7 +99,7 @@ static int on_url_cb(llhttp_t *parser, const char *at, size_t length)
 {
 	struct http_client *client = (struct http_client*)parser->data;
 
-	//client->uri_str = realloc(client->uri_str, client->uri_str_len + length);
+	client->uri_str = realloc(client->uri_str, client->uri_str_len + length);
 	memcpy(client->uri_str + client->uri_str_len, at, length);
 	client->uri_str_len += length;
 
@@ -194,84 +108,58 @@ static int on_url_cb(llhttp_t *parser, const char *at, size_t length)
 
 static int on_url_complete_cb(llhttp_t* parser)
 {
-//	struct http_client *client = (struct http_client*)parser->data;
-//
-//	char errorPos;
-//	int ret;
-//	UriUriA uri;
-//
-//	client->uri_str[client->uri_str_len] = 0;
-//	if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
-//		 fprintf(stderr, "Parse uri fail: %s\n", errorPos);
-//		 return -1;
-//	}
-//
-//	if (uri.pathHead != NULL) {
-//		size_t bucket_name_len = uri.pathHead->text.afterLast - uri.pathHead->text.first;
-//		if (bucket_name_len > 0) {
-//			client->bucket_name = malloc(bucket_name_len + 1);
-//			memcpy(client->bucket_name, uri.pathHead->text.first, bucket_name_len);
-//			client->bucket_name[bucket_name_len] = 0;
-//			unescapeHtml(client->bucket_name);
-//
-//			if (uri.pathHead->next != NULL && uri.pathHead->next->text.afterLast - uri.pathHead->next->text.first > 0) {
-//				// calculate total length
-//				size_t object_name_len = 0;
-//				size_t num_segments = 0;
-//				size_t off = 0;
-//				UriPathSegmentA *segment;
-//
-//				for (segment = uri.pathHead->next, num_segments = 0; segment != NULL; segment = segment->next, num_segments++) {
-//					object_name_len += segment->text.afterLast - segment->text.first;
-//				}
-//
-//				// object scope exists
-//				if (num_segments > 0) {
-//					object_name_len += num_segments;
-//					client->object_name = malloc(sizeof(char) * object_name_len + 1);
-//					for (segment = uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
-//						size_t len = segment->text.afterLast - segment->text.first;
-//						memcpy(client->object_name + off, segment->text.first, len);
-//						off += len;
-//						*(client->object_name + off++) = '/';
-//					}
-//					*(client->object_name + object_name_len - 1) = 0;
-//				//unescapeHtml(client->object_name);
-//				}
-//			}
-//		}
-//	}
-
 	struct http_client *client = (struct http_client*)parser->data;
 
-	client->uri_str[client->uri_str_len] = 0;
-	char *url = malloc(client->uri_str_len + 1);
-	memcpy(url, client->uri_str, client->uri_str_len);
-	url[client->uri_str_len] = 0;
+	char errorPos;
+	int ret;
+	UriUriA uri;
 
-	char *token = strtok(url, "/?");
-
-	if (token != NULL) {
-		//client->bucket_name = malloc(strlen(token) + 1);
-		memcpy(client->bucket_name, token, strlen(token));
-		client->bucket_name[strlen(token)] = 0;
-
-		token = strtok(NULL, "/");
-		if (token != NULL) {
-			//client->object_name = malloc(strlen(token) + 1);
-			memcpy(client->object_name, token, strlen(token));
-			client->object_name[strlen(token)] = 0;
-		}
-		//else {
-		//	client->object_name = NULL;
-		//}
+	client->uri_str = realloc(client->uri_str, client->uri_str_len + 1);
+	client->uri_str[client->uri_str_len] = '\0';
+	if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
+		 fprintf(stderr, "Parse uri fail: %s\n", errorPos);
+		 return -1;
 	}
-	//else {
-	//	client->bucket_name = NULL;
-	//	client->object_name = NULL;
-	//}
 
-	free(url);
+	if (uri.pathHead != NULL) {
+		size_t bucket_name_len = uri.pathHead->text.afterLast - uri.pathHead->text.first;
+		if (bucket_name_len > 0) {
+			client->bucket_name = malloc(bucket_name_len + 1);
+			memcpy(client->bucket_name, uri.pathHead->text.first, bucket_name_len);
+			client->bucket_name[bucket_name_len] = '\0';
+			unescapeHtml(client->bucket_name);
+
+			if (uri.pathHead->next != NULL && uri.pathHead->next->text.afterLast - uri.pathHead->next->text.first > 0) {
+				// calculate total length
+				size_t object_name_len = 0;
+				size_t num_segments = 0;
+				size_t off = 0;
+				UriPathSegmentA *segment;
+
+				for (segment = uri.pathHead->next, num_segments = 0; segment != NULL; segment = segment->next, num_segments++) {
+					object_name_len += segment->text.afterLast - segment->text.first;
+				}
+
+				// object scope exists
+				if (num_segments > 0) {
+					object_name_len += num_segments;
+					object_name_len -=1;
+					client->object_name = malloc(sizeof(char) * object_name_len + 1);
+					for (segment = uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
+						size_t len = segment->text.afterLast - segment->text.first;
+						memcpy(client->object_name + off, segment->text.first, len);
+						off += len;
+						*(client->object_name + off++) = '/';
+					}
+					client->object_name[object_name_len] = '\0';
+					unescapeHtml(client->object_name);
+				}
+			}
+		}
+	}
+
+	if (ret == URI_SUCCESS)
+		uriFreeUriMembersA(&uri);
 
 	return 0;
 }
@@ -308,7 +196,7 @@ static int on_message_complete_cb(llhttp_t* parser)
 	else {
 		// DEBUG
 		client->response_size = snprintf(NULL, 0, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str) + 1;
-		//client->response = malloc(client->response_size);
+		client->response = malloc(client->response_size);
 		snprintf(client->response, client->response_size, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str);
 		client->response_size--;
 		send_response(client);
@@ -349,7 +237,7 @@ static int on_headers_complete_cb(llhttp_t* parser)
 
 	// finish off the header fields
 	if (client->header_value_parsed > 0) {
-		client->header_values[client->num_fields][client->header_value_parsed] = 0;
+		client->header_values[client->num_fields][client->header_value_parsed] = '\0';
 		client->num_fields++;
 	}
 
@@ -375,7 +263,7 @@ static int on_headers_complete_cb(llhttp_t* parser)
 
 		char *url = malloc(client->uri_str_len + 1);
 		memcpy(url, client->uri_str, client->uri_str_len);
-		url[client->uri_str_len] = 0;
+		url[client->uri_str_len] = '\0';
 
 		if ((ret = uriParseSingleUriA(&uri, url, &errorPos)) != URI_SUCCESS) {
 			fprintf(stderr, "Parse uri fail: %c\n", errorPos);
@@ -406,6 +294,66 @@ static int on_headers_complete_cb(llhttp_t* parser)
 	return 0;
 }
 
+void reset_http_client(struct http_client *client)
+{
+//	for (size_t i = 0; i < client->num_fields; i++) {
+//		if (client->header_fields[i]) free(client->header_fields[i]);
+//		if (client->header_values[i]) free(client->header_values[i]);
+//	}
+
+	client->num_fields = 0;
+	client->expect = NONE;
+
+	client->uri_str_len = 0;
+
+	if (client->bucket_name != NULL)  {
+		free(client->bucket_name);
+		client->bucket_name = NULL;
+	}
+
+	if (client->object_name != NULL)  {
+		free(client->object_name);
+		client->object_name = NULL;
+	}
+
+	if (client->put_buf != NULL)  {
+		free(client->put_buf);
+		client->put_buf = NULL;
+		client->object_offset = 0;
+	}
+
+	if (client->response != NULL) {
+		free(client->response);
+		client->response = NULL;
+		client->response_size = 0;
+		client->response_sent = 0;
+	}
+
+	//memset(client->data_payload, 0, 1024*1024*4);
+	//client->data_payload_size = 0;
+	//client->data_payload_sent = 0;
+	if (client->data_payload != NULL) {
+		free(client->data_payload);
+		client->data_payload = NULL;
+		client->data_payload_size = 0;
+		client->data_payload_sent = 0;
+	}
+
+	client->prval = 0;
+	client->object_size = 0;
+	client->parsing = false;
+	client->deleting = false;
+	client->chunked_upload = false;
+
+	client->header_field_parsed = 0;
+	client->header_value_parsed = 0;
+
+//	llhttp_finish(&(client->parser));
+//
+//	llhttp_settings_init(&(client->settings));
+//	llhttp_init(&(client->parser), HTTP_BOTH, &(client->settings));
+}
+
 struct http_client *create_http_client(int epoll_fd, int fd, rados_ioctx_t *bucket_io_ctx, rados_ioctx_t *data_io_ctx)
 {
 	struct http_client *client = (struct http_client*)calloc(1, sizeof(struct http_client));
@@ -422,14 +370,18 @@ struct http_client *create_http_client(int epoll_fd, int fd, rados_ioctx_t *buck
 	client->settings.on_reset = on_reset_cb;
 	client->settings.on_body = on_body_cb;
 
+	client->put_buf = NULL;
 	client->data_payload = NULL;
+	client->bucket_name = NULL;
+	client->object_name = NULL;
+	client->response = NULL;
+	client->uri_str = malloc(0);
 	reset_http_client(client);
 
 	client->epoll_fd = epoll_fd;
 	client->fd = fd;
 	client->parser.data = client;
 
-	//client->uri_str = malloc(0);
 //	client->header_fields = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 //	client->header_values = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 
@@ -444,4 +396,22 @@ struct http_client *create_http_client(int epoll_fd, int fd, rados_ioctx_t *buck
 	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_head_read_completion));
 
 	return client;
+}
+
+void free_http_client(struct http_client *client)
+{
+	llhttp_finish(&(client->parser));
+	reset_http_client(client);
+
+//	free(client->header_fields);
+//	free(client->header_values);
+	free(client->uri_str);
+
+	rados_aio_release(client->aio_head_read_completion);
+	rados_aio_release(client->aio_completion);
+
+	rados_release_read_op(client->read_op);
+	rados_release_write_op(client->write_op);
+
+	free(client);
 }

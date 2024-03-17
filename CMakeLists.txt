@@ -58,10 +58,10 @@ set_target_properties(http_server PROPERTIES
         C_STANDARD 11)
 target_compile_options(http_server PRIVATE
 	-fstack-protector-all -Wall -Wextra -ggdb -O3 -g)
-	#-fsanitize=undefined,address -fno-omit-frame-pointer -fstack-protector -Wall -Wextra -ggdb -O3 -g)
+#-fsanitize=undefined,address -fno-omit-frame-pointer -fstack-protector -Wall -Wextra -ggdb -O3 -g)
 target_link_options(http_server PRIVATE
 	-fstack-protector-all -Wall -Wextra -ggdb -O3 -g)
-	#-fsanitize=undefined,address -fno-omit-frame-pointer -fstack-protector -Wall -Wextra -ggdb -O3 -g)
+#-fsanitize=undefined,address -fno-omit-frame-pointer -fstack-protector -Wall -Wextra -ggdb -O3 -g)
 
 # build driver application
 add_executable(server.out src/server.c)
@@ -75,10 +75,10 @@ set_target_properties(server.out PROPERTIES
     C_STANDARD 11)
 target_compile_options(server.out PRIVATE
 	-fstack-protector-all -O3 -Wall -Wextra -g)
-	#-fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector -O3 -Wall -Wextra -g)
+#-fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector -O3 -Wall -Wextra -g)
 target_link_options(server.out PRIVATE
 	-fstack-protector-all -O3 -Wall -Wextra -g)
-	#-fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector -O3 -Wall -Wextra -g)
+#-fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector -O3 -Wall -Wextra -g)
 
 ## install binary, library, and public header
 #install(TARGETS s3_benchmark.out DESTINATION bin)

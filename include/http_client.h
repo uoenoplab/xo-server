@@ -36,8 +36,7 @@ struct http_client {
 	int epoll_fd;
 	int fd;
 
-	//char *put_buf;
-	char put_buf[1024*1024*4];
+	char *put_buf;
 
 	int prval;
 	rados_xattrs_iter_t iter;
@@ -51,24 +50,20 @@ struct http_client {
 	ssize_t data_payload_sent;
 	ssize_t data_payload_size;
 	char *data_payload;
-	//char data_payload[1024*1024*4];
 
 	ssize_t response_sent;
 	ssize_t response_size;
-	//char *response;
-	char response[65536];
+	char *response;
 
 	llhttp_t parser;
 	llhttp_settings_t settings;
 	enum http_expect expect;
 	enum llhttp_method method;
 
-	//char *bucket_name;
-	//char *object_name;
-	char bucket_name[65536];
-	char object_name[65536];
+	char *bucket_name;
+	char *object_name;
 
-	char uri_str[4096];
+	char *uri_str;
 	size_t uri_str_len;
 	//UriUriA uri;
 
