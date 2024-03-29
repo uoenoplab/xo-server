@@ -94,7 +94,7 @@ struct http_client {
 	xmlParserCtxtPtr xml_ctx;
 };
 
-struct http_client *create_http_client(int epoll_fd, int fd, rados_ioctx_t *bucket_io_ctx, rados_ioctx_t *data_io_ctx);
+struct http_client *create_http_client(int epoll_fd, int fd);
 void reset_http_client(struct http_client *client);
 void free_http_client(struct http_client *client);
 

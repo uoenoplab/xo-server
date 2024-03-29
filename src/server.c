@@ -38,11 +38,11 @@
 size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 4;
 
 volatile sig_atomic_t server_running = 1;
-volatile rados_t cluster;
 
 struct thread_param {
 	int server_fd;
 	int thread_id;
+	rados_t *cluster;
 };
 
 void handleCtrlC(int signum) {
@@ -50,7 +50,7 @@ void handleCtrlC(int signum) {
 	server_running = 0; // Set the flag to stop the server gracefully.
 }
 
-void handle_new_connection(int epoll_fd, int server_fd, int thread_id, rados_ioctx_t *bucket_io_ctx, rados_ioctx_t *data_io_ctx)
+void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
 {
 	pid_t tid = gettid();
 
@@ -71,7 +71,7 @@ void handle_new_connection(int epoll_fd, int server_fd, int thread_id, rados_ioc
 
 	struct epoll_event event;
 	event.events = EPOLLIN; // Edge-triggered mode
-	struct http_client *client = create_http_client(epoll_fd, new_socket, bucket_io_ctx, data_io_ctx);
+	struct http_client *client = create_http_client(epoll_fd, new_socket);
 	event.data.ptr = client;
 
 	fcntl(new_socket, F_SETFL, fcntl(new_socket, F_GETFL, 0) | O_NONBLOCK);
@@ -94,7 +94,7 @@ void handle_client_disconnect(int epoll_fd, struct http_client *client)
 	free_http_client(client);
 }
 
-void handle_client_data(int epoll_fd, struct http_client *client, char *client_data_buffer, int thread_id)
+void handle_client_data(int epoll_fd, struct http_client *client, char *client_data_buffer, int thread_id, rados_ioctx_t *bucket_io_ctx, rados_ioctx_t *data_io_ctx)
 {
 	ssize_t bytes_received;
 
@@ -114,6 +114,8 @@ void handle_client_data(int epoll_fd, struct http_client *client, char *client_d
 	}
 
 	enum llhttp_errno ret;
+	client->bucket_io_ctx = bucket_io_ctx;
+	client->data_io_ctx = data_io_ctx;
 
 	// Echo the received data back to the client
 	ret = llhttp_execute(&(client->parser), client_data_buffer, bytes_received);
@@ -134,8 +136,10 @@ static void *conn_wait(void *arg)
 	rados_ioctx_t data_io_ctx;
 
 	struct thread_param *param = (struct thread_param*)arg;
-	int server_fd = param->server_fd;
+	//int server_fd = param->server_fd;
+	int server_fd = -1;
 	int thread_id = param->thread_id;
+	rados_t *cluster = param->cluster;
 
 	char *client_data_buffer = malloc(BUF_SIZE);
 
@@ -144,14 +148,47 @@ static void *conn_wait(void *arg)
 	struct epoll_event *events = (struct epoll_event*)malloc(sizeof(struct epoll_event) * MAX_EVENTS);
 	assert(events != NULL);
 
-	int err = rados_ioctx_create(cluster, BUCKET_POOL, &bucket_io_ctx);
+	const int enable = 1;
+	struct sockaddr_in server_addr, client_addr;
+
+	// Create a TCP socket
+	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+		perror("socket");
+		exit(EXIT_FAILURE);
+	}
+
+	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0)
+		perror("setsockopt(SO_REUSEADDR) failed");
+
+	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(int)) < 0)
+		perror("setsockopt(SO_REUSEPORT) failed");
+
+	// Initialize server address structure
+	memset(&server_addr, 0, sizeof(server_addr));
+	server_addr.sin_family = AF_INET;
+	server_addr.sin_addr.s_addr = INADDR_ANY;
+	server_addr.sin_port = htons(PORT);
+
+	// Bind the socket to the server address
+	if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
+		perror("bind");
+		exit(EXIT_FAILURE);
+	}
+
+	// Listen for incoming connections
+	if (listen(server_fd, 100) == -1) {
+		perror("listen");
+		exit(EXIT_FAILURE);
+	}
+
+	int err = rados_ioctx_create(*cluster, BUCKET_POOL, &bucket_io_ctx);
 	if (err < 0) {
 		fprintf(stderr, "cannot open rados pool %s: %s\n", BUCKET_POOL, strerror(-err));
 		rados_shutdown(cluster);
 		exit(1);
 	}
 
-	err = rados_ioctx_create(cluster, DATA_POOL, &data_io_ctx);
+	err = rados_ioctx_create(*cluster, DATA_POOL, &data_io_ctx);
 	if (err < 0) {
 		fprintf(stderr, "cannot open rados pool %s: %s\n", DATA_POOL, strerror(-err));
 		rados_shutdown(cluster);
@@ -166,7 +203,7 @@ static void *conn_wait(void *arg)
 
 	// Add the server socket to the epoll event list
 	event.events = EPOLLIN;
-	struct http_client *server_client = create_http_client(server_fd, server_fd, NULL, NULL);
+	struct http_client *server_client = create_http_client(server_fd, server_fd);
 	event.data.ptr = server_client;
 
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
@@ -193,18 +230,19 @@ static void *conn_wait(void *arg)
 			// Handle events using callback functions
 			struct http_client *c = (struct http_client*)events[i].data.ptr;
 			if (c->fd == server_fd) {
-				handle_new_connection(epoll_fd, server_fd, thread_id, &bucket_io_ctx, &data_io_ctx);
+				handle_new_connection(epoll_fd, server_fd, thread_id);
 			}
 			else if (events[i].events & EPOLLOUT) {
 				send_client_data(c);
 			}
 			else if (events[i].events & EPOLLIN) {
-				handle_client_data(epoll_fd, c, client_data_buffer, thread_id);
+				handle_client_data(epoll_fd, c, client_data_buffer, thread_id, &bucket_io_ctx, &data_io_ctx);
 			}
 		}
 	}
 
 	close(epoll_fd);
+		close(server_fd);
 
 	free(client_data_buffer);
 	free_http_client(server_client);
@@ -218,15 +256,16 @@ static void *conn_wait(void *arg)
 
 int main(int argc, char *argv[])
 {
+	rados_t cluster;
 	struct sigaction sa;
 	const int enable = 1;
 	int err;
 
-	struct sockaddr_in server_addr, client_addr;
-	int server_fd;
+	//struct sockaddr_in server_addr, client_addr;
+	//int server_fd;
 
 	//long nproc = sysconf(_SC_NPROCESSORS_ONLN);
-	long nproc = 1;
+	long nproc = 4;
 	pthread_t threads[nproc];
 	struct thread_param param[nproc];
 
@@ -248,33 +287,6 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	// Create a TCP socket
-	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-		perror("socket");
-		exit(EXIT_FAILURE);
-	}
-
-	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0)
-		perror("setsockopt(SO_REUSEADDR) failed");
-
-	// Initialize server address structure
-	memset(&server_addr, 0, sizeof(server_addr));
-	server_addr.sin_family = AF_INET;
-	server_addr.sin_addr.s_addr = INADDR_ANY;
-	server_addr.sin_port = htons(PORT);
-
-	// Bind the socket to the server address
-	if (bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
-		perror("bind");
-		exit(EXIT_FAILURE);
-	}
-
-	// Listen for incoming connections
-	if (listen(server_fd, 100) == -1) {
-		perror("listen");
-		exit(EXIT_FAILURE);
-	}
-
 	cpu_set_t cpus;
 	pthread_attr_t attr;
 	sigset_t sigmask;
@@ -293,7 +305,8 @@ int main(int argc, char *argv[])
 	printf("Server is listening on port %d with %ld threads\n", PORT, nproc);
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
-		param[i].server_fd = server_fd;
+		//param[i].server_fd = server_fd;
+		param[i].cluster = &cluster;
 
 		CPU_ZERO(&cpus);
 		CPU_SET((i + 1) % nproc, &cpus);
@@ -310,6 +323,7 @@ int main(int argc, char *argv[])
 	// block until SIGINT
 	pause();
 	//conn_wait(&param[0]);
+	printf("terminating\n");
 
 	for (int i = 0; i < nproc; i++) {
 		if (pthread_kill(threads[i], SIGUSR1) != 0) {
@@ -323,7 +337,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	close(server_fd);
+	//close(server_fd);
 	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);
 	printf("Server terminated!\n");

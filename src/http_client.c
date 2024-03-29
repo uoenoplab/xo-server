@@ -354,7 +354,7 @@ void reset_http_client(struct http_client *client)
 //	llhttp_init(&(client->parser), HTTP_BOTH, &(client->settings));
 }
 
-struct http_client *create_http_client(int epoll_fd, int fd, rados_ioctx_t *bucket_io_ctx, rados_ioctx_t *data_io_ctx)
+struct http_client *create_http_client(int epoll_fd, int fd)
 {
 	struct http_client *client = (struct http_client*)calloc(1, sizeof(struct http_client));
 
@@ -385,8 +385,8 @@ struct http_client *create_http_client(int epoll_fd, int fd, rados_ioctx_t *buck
 //	client->header_fields = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 //	client->header_values = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 
-	client->bucket_io_ctx = bucket_io_ctx;
-	client->data_io_ctx = data_io_ctx;
+	client->bucket_io_ctx = NULL;
+	client->data_io_ctx = NULL;
 
 	client->prval = 0;
 	client->write_op = rados_create_write_op();
