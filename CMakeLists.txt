@@ -64,13 +64,15 @@ target_link_options(http_server PRIVATE
 #-fsanitize=undefined,address -fno-omit-frame-pointer -fstack-protector -Wall -Wextra -ggdb -O3 -g)
 
 # build driver application
-add_executable(server.out src/server.c)
+add_executable(server.out src/server.c src/tls.c)
 target_include_directories(server.out PUBLIC
     ${llhttp_SOURCE_DIR}/include
     ${LIBXML2_INCLUDE_DIR}
     include)
 target_link_libraries(server.out PUBLIC
-    http_server)
+    http_server
+    OpenSSL::Crypto
+    OpenSSL::SSL)
 set_target_properties(server.out PROPERTIES
     C_STANDARD 11)
 target_compile_options(server.out PRIVATE
@@ -85,6 +87,8 @@ target_link_options(server.out PRIVATE
 #install(TARGETS benchmark DESTINATION lib)
 #install(FILES include/benchmark.hh DESTINATION include)
 
+file(COPY ${CMAKE_SOURCE_DIR}/assets DESTINATION ${CMAKE_BINARY_DIR})
+
 message(STATUS "Building xo server binary")
 
 # uninstall target
@@ -97,4 +101,3 @@ message(STATUS "Building xo server binary")
 #  add_custom_target(uninstall
 #    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/cmake_uninstall.cmake)
 #endif()
-
