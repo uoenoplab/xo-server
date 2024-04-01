@@ -275,8 +275,9 @@ err:
 
 void tls_free_client(struct http_client *client) {
 	if (client->tls.ssl) SSL_free(client->tls.ssl);
-	if (client->tls.wbio) BIO_free_all(client->tls.wbio);
-	if (client->tls.rbio) BIO_free_all(client->tls.rbio);
+	// We shouldn't free BIO since it will be freed at SSL_free
+	//if (client->tls.wbio) BIO_free_all(client->tls.wbio);
+	//if (client->tls.rbio) BIO_free_all(client->tls.rbio);
 }
 
 // per connection
