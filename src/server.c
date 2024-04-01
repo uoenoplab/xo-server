@@ -168,6 +168,9 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 		// Client closed the connection or an error occurred
 		if (bytes_received == 0) {
 			printf("Thread %d: Client disconnected: %d\n", thread_id, client->fd);
+		} else if (errno = EAGAIN) {
+			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
+			return;
 		} else {
 			perror("recv");
 		}
@@ -188,7 +191,7 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 		if (bytes_received == 0) return;
 	}
 
-	printf("%.*s", (int)bytes_received, client_data_buffer);
+	//printf("%.*s", (int)bytes_received, client_data_buffer);
 
 	client->bucket_io_ctx = bucket_io_ctx;
 	client->data_io_ctx = data_io_ctx;
@@ -343,7 +346,7 @@ int main(int argc, char *argv[])
 	//int server_fd;
 
 	//long nproc = sysconf(_SC_NPROCESSORS_ONLN);
-	long nproc = 1;
+	long nproc = 4;
 	pthread_t threads[nproc];
 	struct thread_param param[nproc];
 

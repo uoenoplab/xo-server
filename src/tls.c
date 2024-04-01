@@ -93,8 +93,8 @@ void keylog_callback(const SSL *ssl, const char *line)
 		}
 		hex_to_bytes(traffic_secret_start, client->tls.client_traffic_secret,
 			sizeof(client->tls.client_traffic_secret));
-		hexdump("client->tls.client_traffic_secret", client->tls.client_traffic_secret,
-			sizeof(client->tls.client_traffic_secret));
+		//hexdump("client->tls.client_traffic_secret", client->tls.client_traffic_secret,
+		//	sizeof(client->tls.client_traffic_secret));
 		client->tls.is_client_traffic_secret_set = true;
 	} else {
 		if (client->tls.is_server_traffic_secret_set) {
@@ -103,8 +103,8 @@ void keylog_callback(const SSL *ssl, const char *line)
 		}
 		hex_to_bytes(traffic_secret_start, client->tls.server_traffic_secret,
 			sizeof(client->tls.server_traffic_secret));
-		hexdump("client->tls.client_traffic_secret", client->tls.server_traffic_secret,
-			sizeof(client->tls.server_traffic_secret));
+		//hexdump("client->tls.client_traffic_secret", client->tls.server_traffic_secret,
+		//	sizeof(client->tls.server_traffic_secret));
 		client->tls.is_server_traffic_secret_set = true;
 	}
 }
