@@ -168,7 +168,7 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 		// Client closed the connection or an error occurred
 		if (bytes_received == 0) {
 			printf("Thread %d: Client disconnected: %d\n", thread_id, client->fd);
-		} else if (errno = EAGAIN) {
+		} else if (errno == EAGAIN && client->tls.is_ssl && client->tls.is_ktls_set) {
 			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
 			return;
 		} else {
