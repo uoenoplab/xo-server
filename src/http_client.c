@@ -395,6 +395,16 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	rados_aio_create_completion((void*)client, aio_ack_callback, aio_commit_callback, &(client->aio_completion));
 	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_head_read_completion));
 
+	client->tls.is_ssl = true;
+	client->tls.is_handshake_done = false;
+	client->tls.is_ktls_set = false;
+	client->tls.ssl = NULL;
+	client->tls.rbio = NULL;
+	client->tls.wbio = NULL;
+	client->tls.client_hello_check_off = false;
+	client->tls.is_client_traffic_secret_set = false;
+	client->tls.is_server_traffic_secret_set = false;
+
 	return client;
 }
 

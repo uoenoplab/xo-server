@@ -20,6 +20,9 @@ enum http_expect { CONTINUE, NONE };
 
 extern size_t BUF_SIZE;
 
+typedef struct ssl_st SSL;
+typedef struct bio_st BIO;
+
 static char *HTTP_OK_HDR = (char *)"HTTP/1.1 200 OK\r\n"
 		 "Connection: keep-alive\r\n"
 		 "Server: Apache/2.2.800";
@@ -92,6 +95,26 @@ struct http_client {
 	RollingMD5Context md5_ctx;
 
 	xmlParserCtxtPtr xml_ctx;
+
+	struct tls {
+		bool is_ssl;
+		bool is_handshake_done;
+		bool is_ktls_set;
+
+		SSL *ssl;
+
+		BIO *rbio; /* SSL reads from, we write to. */
+		BIO *wbio; /* SSL writes to, we read from. */
+
+		int client_hello_check_off;
+		char client_hello_check_buf[3];
+
+		bool is_client_traffic_secret_set;
+		bool is_server_traffic_secret_set;
+
+		char client_traffic_secret[48];
+		char server_traffic_secret[48];
+	} tls;
 };
 
 struct http_client *create_http_client(int epoll_fd, int fd);

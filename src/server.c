@@ -15,6 +15,7 @@
 #include <fcntl.h>
 
 #include "http_client.h"
+#include "tls.h"
 
 #define PORT 8080
 #define MAX_EVENTS 1000
@@ -91,31 +92,13 @@ void handle_client_disconnect(int epoll_fd, struct http_client *client)
 		perror("epoll_ctl");
 	}
 	close(fd);
+	tls_free_client(client);
 	free_http_client(client);
 }
 
-void handle_client_data(int epoll_fd, struct http_client *client, char *client_data_buffer, int thread_id, rados_ioctx_t *bucket_io_ctx, rados_ioctx_t *data_io_ctx)
+static void do_llhttp_execute(struct http_client *client, char *client_data_buffer, ssize_t bytes_received)
 {
-	ssize_t bytes_received;
-
-	memset(client_data_buffer, 0, BUF_SIZE);
-	bytes_received = recv(client->fd, client_data_buffer, BUF_SIZE, 0);
-	if (bytes_received <= 0) {
-		// Client closed the connection or an error occurred
-		if (bytes_received == 0) {
-			printf("Thread %d: Client disconnected: %d\n", thread_id, client->fd);
-		} else {
-			perror("recv");
-		}
-
-		// Remove the client socket from the epoll event list
-		handle_client_disconnect(epoll_fd, client); // Handle client disconnection
-		return;
-	}
-
 	enum llhttp_errno ret;
-	client->bucket_io_ctx = bucket_io_ctx;
-	client->data_io_ctx = data_io_ctx;
 
 	// Echo the received data back to the client
 	ret = llhttp_execute(&(client->parser), client_data_buffer, bytes_received);
@@ -128,6 +111,91 @@ void handle_client_data(int epoll_fd, struct http_client *client, char *client_d
 		//close(client->fd);
 		//free_http_client(client);
 	}
+}
+
+// return number of bytes left in client_data_buffer after this function
+// on error return -1
+static ssize_t handle_client_data_ssl(struct http_client *client, SSL_CTX *ssl_ctx,
+	char *client_data_buffer, ssize_t bytes_received)
+{
+	// printf("%s: bytes_received %d\n", __func__, bytes_received);
+
+	// HTTP or HTTPS not decided and SSL not initlized for this conn
+	if (client->tls.ssl == NULL) {
+		if (tls_init_client(ssl_ctx, client, client_data_buffer, bytes_received) == -1) {
+			perror("tls_conn_init");
+			return -1;
+		}
+
+		// Not enough bytes to identity HTTP or HTTPS
+		if (client->tls.is_ssl && client->tls.ssl == NULL) {
+			return 0;
+		}
+
+		// Not SSL, use HTTP, need to feed bytes to llhttp from preivous recv first
+		if (!client->tls.is_ssl) {
+			if (client->tls.client_hello_check_off > 0) {
+				do_llhttp_execute(client, client->tls.client_hello_check_buf,
+					client->tls.client_hello_check_off);
+			}
+			return bytes_received;
+		}
+	}
+
+	if (client->tls.is_ktls_set) {
+		// do nothing
+		return bytes_received;
+	}
+
+	if (!client->tls.is_handshake_done) {
+		return tls_handle_handshake(client, client_data_buffer, bytes_received);
+	}
+
+	fprintf(stderr, "%s: error state as handshake is done but ktls not set\n", __func__);
+	return -1; // Shouldn't happen
+	// Handle handshake?
+}
+
+void handle_client_data(int epoll_fd, struct http_client *client,
+	char *client_data_buffer, int thread_id, rados_ioctx_t *bucket_io_ctx,
+	rados_ioctx_t *data_io_ctx, SSL_CTX *ssl_ctx)
+{
+	ssize_t bytes_received;
+
+	memset(client_data_buffer, 0, BUF_SIZE);
+	bytes_received = recv(client->fd, client_data_buffer, BUF_SIZE, 0);
+	if (bytes_received <= 0) {
+		// Client closed the connection or an error occurred
+		if (bytes_received == 0) {
+			printf("Thread %d: Client disconnected: %d\n", thread_id, client->fd);
+		} else if (errno == EAGAIN && client->tls.is_ssl && client->tls.is_ktls_set) {
+			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
+			return;
+		} else {
+			perror("recv");
+		}
+
+		// Remove the client socket from the epoll event list
+		handle_client_disconnect(epoll_fd, client); // Handle client disconnection
+		return;
+	}
+
+	// printf("%s: bytes_received %d\n", __func__, bytes_received);
+
+	if (client->tls.is_ssl){
+		bytes_received = handle_client_data_ssl(client, ssl_ctx, client_data_buffer, bytes_received);
+		if (bytes_received == -1) {
+			fprintf(stderr, "%s: handle_client_data_ssl returned %d\n", __func__, bytes_received);
+			exit(EXIT_FAILURE);
+		}
+		if (bytes_received == 0) return;
+	}
+
+	//printf("%.*s", (int)bytes_received, client_data_buffer);
+
+	client->bucket_io_ctx = bucket_io_ctx;
+	client->data_io_ctx = data_io_ctx;
+	do_llhttp_execute(client, client_data_buffer, bytes_received);
 }
 
 static void *conn_wait(void *arg)
@@ -150,6 +218,12 @@ static void *conn_wait(void *arg)
 
 	const int enable = 1;
 	struct sockaddr_in server_addr, client_addr;
+
+	SSL_CTX *ssl_ctx = tls_init_ctx("./assets/server.crt", "./assets/server.key");
+	if (ssl_ctx == NULL) {
+		perror("tls_init_ctx");
+		exit(EXIT_FAILURE);
+	}
 
 	// Create a TCP socket
 	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
@@ -236,14 +310,15 @@ static void *conn_wait(void *arg)
 				send_client_data(c);
 			}
 			else if (events[i].events & EPOLLIN) {
-				handle_client_data(epoll_fd, c, client_data_buffer, thread_id, &bucket_io_ctx, &data_io_ctx);
+				handle_client_data(epoll_fd, c, client_data_buffer, thread_id, &bucket_io_ctx, &data_io_ctx, ssl_ctx);
 			}
 		}
 	}
 
 	close(epoll_fd);
-		close(server_fd);
+	close(server_fd);
 
+	tls_uninit_ctx(ssl_ctx);
 	free(client_data_buffer);
 	free_http_client(server_client);
 	free(events);
@@ -260,6 +335,12 @@ int main(int argc, char *argv[])
 	struct sigaction sa;
 	const int enable = 1;
 	int err;
+
+	err = tls_init();
+	if (err < 0) {
+		fprintf(stderr, "%s: cannot init openssl\n", __func__);
+		exit(1);
+	}
 
 	//struct sockaddr_in server_addr, client_addr;
 	//int server_fd;
