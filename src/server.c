@@ -17,6 +17,13 @@
 #include "http_client.h"
 #include "tls.h"
 
+#include <ini.h>
+
+#include <netinet/in.h>
+#include <net/if.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+
 #define PORT 8080
 #define MAX_EVENTS 1000
 
@@ -39,6 +46,10 @@
 size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 4;
 
 volatile sig_atomic_t server_running = 1;
+char *ifname = NULL;
+char *osd_ips[65536] = { NULL };
+char *my_ip_address = NULL;
+long my_osd_id = -1;
 
 struct thread_param {
 	int server_fd;
@@ -185,7 +196,7 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 	if (client->tls.is_ssl){
 		bytes_received = handle_client_data_ssl(client, ssl_ctx, client_data_buffer, bytes_received);
 		if (bytes_received == -1) {
-			fprintf(stderr, "%s: handle_client_data_ssl returned %d\n", __func__, bytes_received);
+			fprintf(stderr, "%s: handle_client_data_ssl returned %ld\n", __func__, bytes_received);
 			exit(EXIT_FAILURE);
 		}
 		if (bytes_received == 0) return;
@@ -329,6 +340,36 @@ static void *conn_wait(void *arg)
 	return NULL;
 }
 
+static int ceph_config_parser(void* user, const char* section, const char* name, const char* value)
+{
+	long osd_id = -1;
+
+	// to get my ip addr
+        struct ifreq ifr;
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+	ifr.ifr_addr.sa_family = AF_INET;
+	strncpy(ifr.ifr_name , ifname , IFNAMSIZ - 1);
+	ioctl(fd, SIOCGIFADDR, &ifr);
+	close(fd);
+	my_ip_address = strdup(inet_ntoa(( (struct sockaddr_in *)&ifr.ifr_addr )->sin_addr));
+
+	if (strncmp(section, "osd", 3) == 0) {
+		char *id = strstr(section, ".");
+		if (id != NULL) {
+			osd_id = atol(id+1);
+			if (strcmp(name, "public_addr") == 0) {
+				osd_ips[osd_id] = strdup(value);
+				//printf("osd.%d: %s\n", osd_id, osd_ips[osd_id]);
+				if (strcmp(value, my_ip_address) == 0) {
+					my_osd_id = osd_id;
+				}
+			}
+		}
+	}
+
+	return 1;
+}
+
 int main(int argc, char *argv[])
 {
 	rados_t cluster;
@@ -336,19 +377,34 @@ int main(int argc, char *argv[])
 	const int enable = 1;
 	int err;
 
+	if (argc != 3) {
+		fprintf(stderr, "Usage: %s [port] [threads]\n", argv[0]);
+		exit(1);
+	}
+
 	err = tls_init();
 	if (err < 0) {
 		fprintf(stderr, "%s: cannot init openssl\n", __func__);
 		exit(1);
 	}
 
-	//struct sockaddr_in server_addr, client_addr;
-	//int server_fd;
-
 	//long nproc = sysconf(_SC_NPROCESSORS_ONLN);
-	long nproc = 4;
+	long nproc = atol(argv[2]);
 	pthread_t threads[nproc];
 	struct thread_param param[nproc];
+
+	// get my IP address and mapping OSDs
+	ifname = argv[1];
+	err = ini_parse("/etc/ceph/ceph.conf", ceph_config_parser, NULL);
+	if (err < 0) {
+		printf("Can't read '%s'!\n", "/etc/ceph/ceph.conf");
+		exit(1);
+	}
+	else if (err) {
+		printf("Bad config file (first error on line %d)!\n", err);
+		exit(1);
+	}
+	printf("My IP at port %s is %s ; my OSD ID is %ld\n", ifname, my_ip_address, my_osd_id);
 
 	err = rados_create2(&cluster, "ceph", "client.admin", 0);
 	if (err < 0) {
@@ -421,6 +477,12 @@ int main(int argc, char *argv[])
 	//close(server_fd);
 	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);
+
+	free(my_ip_address);
+	for (size_t i = 0; i < 65536; i++) {
+		if (osd_ips[i] != NULL) free(osd_ips[i]);
+	}
+
 	printf("Server terminated!\n");
 
 	return 0;

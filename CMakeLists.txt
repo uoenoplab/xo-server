@@ -29,6 +29,7 @@ endif()
 set(C_SRC
     src/http_client.c
     src/object_store.c
+    src/conn_migration.c
     src/md5.c
     src/util.c
 )
@@ -37,6 +38,8 @@ find_package(LibXml2 REQUIRED)
 find_package(librados2 REQUIRED)
 find_package(uriparser REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(INIH REQUIRED inih)
 
 # build benchmark library
 add_library(http_server STATIC
@@ -67,19 +70,22 @@ target_link_options(http_server PRIVATE
 add_executable(server.out src/server.c src/tls.c)
 target_include_directories(server.out PUBLIC
     ${llhttp_SOURCE_DIR}/include
+    ${INIH_INCLUDE_DIRS}
     ${LIBXML2_INCLUDE_DIR}
     include)
 target_link_libraries(server.out PUBLIC
     http_server
+    ${INIH_LIBRARIES}
     OpenSSL::Crypto
     OpenSSL::SSL)
 set_target_properties(server.out PROPERTIES
     C_STANDARD 11)
 target_compile_options(server.out PRIVATE
-	-fstack-protector-all -O3 -Wall -Wextra -g)
+    ${INIH_CFLAGS_OTHER}
+    -fstack-protector-all -O3 -Wall -Wextra -g)
 #-fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector -O3 -Wall -Wextra -g)
 target_link_options(server.out PRIVATE
-	-fstack-protector-all -O3 -Wall -Wextra -g)
+    -fstack-protector-all -O3 -Wall -Wextra -g)
 #-fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector -O3 -Wall -Wextra -g)
 
 ## install binary, library, and public header

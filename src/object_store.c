@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include "object_store.h"
+#include "osd_mapping.h"
 
 #define FIRST_READ_SIZE sizeof(char) * 1024 * 4096
 
@@ -101,6 +102,16 @@ void init_object_get_request(struct http_client *client)
 	int ret;
 
 	if (client->bucket_name != NULL && client->object_name != NULL) {
+		/* check if we want to migrate */
+		int acting_primary_osd_id = -1;
+		printf("bucket: %s object: %s\n", client->bucket_name, client->object_name);
+		ret = rados_get_object_osd_position(*(client->data_io_ctx), client->object_name, &acting_primary_osd_id);
+		assert(ret == 0);
+
+		if (acting_primary_osd_id != my_osd_id) {
+			conn_migration(client, acting_primary_osd_id);
+		}
+
 		client->data_payload = malloc(FIRST_READ_SIZE);
 
 		rados_aio_release(client->aio_head_read_completion);
