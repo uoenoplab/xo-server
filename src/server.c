@@ -11,18 +11,16 @@
 #include <sys/uio.h>
 #include <pthread.h>
 #include <assert.h>
-
-#include <fcntl.h>
-
-#include "http_client.h"
-#include "tls.h"
-
-#include <ini.h>
-
 #include <netinet/in.h>
 #include <net/if.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <fcntl.h>
+#include <ini.h>
+
+#include "http_client.h"
+#include "tls.h"
+#include "osd_mapping.h"
 
 #define PORT 8080
 #define MAX_EVENTS 1000
@@ -47,9 +45,11 @@ size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 4;
 
 volatile sig_atomic_t server_running = 1;
 char *ifname = NULL;
-char *osd_ips[65536] = { NULL };
-char *my_ip_address = NULL;
-long my_osd_id = -1;
+
+char *osd_addr_strs[MAX_OSDS] = { NULL };
+struct sockaddr_in osd_addrs[MAX_OSDS];
+int osd_ids[MAX_OSDS] = { 0 };
+int num_osds = 0;
 
 struct thread_param {
 	int server_fd;
@@ -340,29 +340,55 @@ static void *conn_wait(void *arg)
 	return NULL;
 }
 
-static int ceph_config_parser(void* user, const char* section, const char* name, const char* value)
-{
-	long osd_id = -1;
-
-	// to get my ip addr
-        struct ifreq ifr;
+static void sort_osd_addrs() {
+	struct ifreq ifr;
 	int fd = socket(AF_INET, SOCK_DGRAM, 0);
 	ifr.ifr_addr.sa_family = AF_INET;
 	strncpy(ifr.ifr_name , ifname , IFNAMSIZ - 1);
 	ioctl(fd, SIOCGIFADDR, &ifr);
 	close(fd);
-	my_ip_address = inet_ntoa(( (struct sockaddr_in *)&ifr.ifr_addr )->sin_addr);
 
+	char *my_ip_address = inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr )->sin_addr);
+
+	// put osd info of this node to end of array
+	for (int i = 0; i < num_osds - 1; i++) {
+		if (strcmp(osd_addr_strs[i], my_ip_address) == 0) {
+			char *osd_addr_str_tmp = osd_addr_strs[num_osds - 1];
+			osd_addr_strs[num_osds - 1] = osd_addr_strs[i];
+			osd_addr_strs[i] = osd_addr_str_tmp;
+
+			int osd_id_tmp = osd_ids[num_osds - 1];
+			osd_ids[num_osds - 1] = osd_ids[i];
+			osd_ids[i] = osd_id_tmp;
+		}
+	}
+
+	printf("My IP at port %s is %s ; my OSD ID is %ld\n",
+		ifname, osd_addr_strs[num_osds - 1], osd_ids[num_osds - 1]);
+
+	for (int i = 0; i < num_osds; i++)
+    {
+        memset(&osd_addrs[i], 0, sizeof(osd_addrs[i]));
+        osd_addrs[i].sin_family = AF_INET;
+        osd_addrs[i].sin_port = htons(PORT);
+        if (inet_pton(AF_INET, osd_addr_strs[i], &osd_addrs[i].sin_addr) <= 0) {
+            printf("Invalid address \"%s\" for osd id %d\n", osd_addr_strs[i], osd_ids[i]);
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
+static int ceph_config_parser(void* user, const char* section, const char* name, const char* value)
+{
+	long osd_id = -1;
 	if (strncmp(section, "osd", 3) == 0) {
 		char *id = strstr(section, ".");
 		if (id != NULL) {
 			osd_id = atol(id+1);
 			if (strcmp(name, "public_addr") == 0) {
-				osd_ips[osd_id] = strdup(value);
-				//printf("osd.%d: %s\n", osd_id, osd_ips[osd_id]);
-				if (strcmp(value, my_ip_address) == 0) {
-					my_osd_id = osd_id;
-				}
+				osd_addr_strs[num_osds] = strdup(value);
+				osd_ids[num_osds] = osd_id;
+				num_osds++;
 			}
 		}
 	}
@@ -404,7 +430,8 @@ int main(int argc, char *argv[])
 		printf("Bad config file (first error on line %d)!\n", err);
 		exit(1);
 	}
-	printf("My IP at port %s is %s ; my OSD ID is %ld\n", ifname, my_ip_address, my_osd_id);
+
+	sort_osd_addrs();
 
 	err = rados_create2(&cluster, "ceph", "client.admin", 0);
 	if (err < 0) {
@@ -477,8 +504,8 @@ int main(int argc, char *argv[])
 	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);
 
-	for (size_t i = 0; i < 65536; i++) {
-		if (osd_ips[i] != NULL) free(osd_ips[i]);
+	for (size_t i = 0; i < num_osds; i++) {
+		if (osd_addr_strs[i] != NULL) free(osd_addr_strs[i]);
 	}
 
 	printf("Server terminated!\n");
