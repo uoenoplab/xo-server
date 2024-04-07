@@ -75,7 +75,7 @@ void keylog_callback(const SSL *ssl, const char *line)
 	traffic_secret_start++;
 
 	if (strlen(traffic_secret_start) != 48 * 2) {
-		fprintf(stderr, "%s: secret incorrect length %d \"%s\"\n", __func__,
+		fprintf(stderr, "%s: secret incorrect length %ld \"%s\"\n", __func__,
 			strlen(traffic_secret_start), traffic_secret_start);
 		exit(EXIT_FAILURE);
 	}
@@ -355,19 +355,19 @@ err_rbio:
 
 static inline void reset_client_send_buffer(struct http_client *client)
 {
-	if (client->response != NULL) {
-		free(client->response);
-		client->response = NULL;
+	//if (client->response != NULL) {
+	//	free(client->response);
+	//	client->response = NULL;
 		client->response_size = 0;
 		client->response_sent = 0;
-	}
+	//}
 
-	if (client->data_payload != NULL) {
-		free(client->data_payload);
-		client->data_payload = NULL;
+	//if (client->data_payload != NULL) {
+		//free(client->data_payload);
+		//client->data_payload = NULL;
 		client->data_payload_size = 0;
 		client->data_payload_sent = 0;
-	}
+	//}
 }
 
 static int tls_make_ktls(struct http_client *client, uint64_t recv_rec_seqnum) {
@@ -539,7 +539,7 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 		// server wants to send server hello / fin etc.
 		if ((ret = BIO_pending(client->tls.wbio)) > 0) {
 			client->response_size = ret;
-			client->response = malloc(client->response_size);
+			//client->response = malloc(client->response_size);
 
 			int bytes_read = 0;
 			while (bytes_read != client->response_size) {
