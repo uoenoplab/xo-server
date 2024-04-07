@@ -26,6 +26,12 @@
 #define HANDOFF_CTRL_PORT 8081
 #define MAX_EVENTS 1000
 
+enum THREAD_EPOLL_EVENT {
+	S3_HTTP_EVENT,
+	HANDOFF_IN_EVENT,
+	HANDOFF_OUT_EVENT,
+}
+
 // 0.  handle incoming conn
 // 1.  read
 // 2.  check if we are reading from an ongoing HTTP message
@@ -57,7 +63,7 @@ struct thread_param {
 	int thread_id;
 	// int server_fd;
 	rados_t *cluster;
-	int handoff_accept_eventfd;
+	int handoff_in_eventfd;
 };
 
 void split_uint64_to_ints(uint64_t value, int *high, int *low) {
@@ -112,6 +118,8 @@ void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
 	struct epoll_event event;
 	event.events = EPOLLIN;
 	struct http_client *client = create_http_client(epoll_fd, new_socket);
+	client->epoll_data_u32 = S3_HTTP_EVENT;
+	event.data.u32 = S3_HTTP_EVENT;
 	event.data.ptr = client;
 
 	set_socket_non_blocking(new_socket);
@@ -275,6 +283,7 @@ void create_new_handoff_out(int epoll_fd, int *out_fd, int *fds_not_connected, i
 		} else {
 			struct epoll_event event = {0};
 			event.data.fd = *out_fd;
+			event.data.u32 = HANDOFF_OUT_EVENT;
 			event.events = EPOLLOUT;
 			if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, *out_fd, &event) == -1) {
 				perror("epoll_ctl");
@@ -386,6 +395,7 @@ static void *conn_wait(void *arg)
 	event.data.fd = targ->efd;
 	printf("thread %d eventfd %d\n", targ->id, targ->efd);
 	event.events = EPOLLIN;
+	event.data.u32 = HANDOFF_IN_EVENT;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, targ->efd, &event) == -1) {
 		perror("epoll_ctl: efd");
 		exit(EXIT_FAILURE);
@@ -426,8 +436,9 @@ static void *conn_wait(void *arg)
 	memset(&event, 0 , sizeof(event));
 	event.events = EPOLLIN;
 	struct http_client *server_client = create_http_client(server_fd, server_fd);
+	server_client->epoll_data_u32 = S3_HTTP_EVENT;
 	event.data.ptr = server_client;
-
+	event.data.u32 = S3_HTTP_EVENT;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
 		perror("epoll_ctl");
 		exit(EXIT_FAILURE);
@@ -449,7 +460,7 @@ static void *conn_wait(void *arg)
 		}
 
 		for (int i = 0; i < event_count; i++) {
-			if (events[i].data.ptr) {
+			if (events[i].data.u32 == S3_HTTP_EVENT) {
 				// Handle events using callback functions
 				struct http_client *c = (struct http_client *)events[i].data.ptr;
 				if (c->fd == server_fd) {
@@ -461,31 +472,75 @@ static void *conn_wait(void *arg)
 				else if (events[i].events & EPOLLIN) {
 					handle_client_data(epoll_fd, c, client_data_buffer, thread_id, &bucket_io_ctx, &data_io_ctx, ssl_ctx);
 				}
-			} else {
-				if (events[i].data.fd == param->handoff_accept_eventfd) {
-					uint64_t val;
-					int in_fd, peer_id;
-					read(param->handoff_accept_eventfd, &val, sizeof(val));
-					split_uint64_to_ints(val, &in_fd, &peer_id);
-					printf("Thread %d received an new handoff client conn %d from peer %d\n",
-						param->thread_id, in_fd, peer_id);
-					if (handoff_in_fds[peer_id] != 0) {
-						// main thread will close old fd and cause global epoll list delete
-						fprintf(stderr, "Thread %d overwrite old client conn %d from peer %d\n",
+			} else if (events[i].data.u32 == HANDOFF_IN_EVENT) {
+				if (events[i].data.fd == param->handoff_in_eventfd) {
+					if (events[i].events & EPOLLIN) {
+						uint64_t val;
+						int in_fd, peer_id;
+						read(param->handoff_in_eventfd, &val, sizeof(val));
+						split_uint64_to_ints(val, &in_fd, &peer_id);
+						printf("Thread %d received an new handoff client conn %d from peer %d\n",
 							param->thread_id, in_fd, peer_id);
+						if (handoff_in_fds[peer_id] != 0) {
+							// main thread will close old fd and cause global epoll list delete
+							fprintf(stderr, "Thread %d overwrite old client conn %d from peer %d\n",
+								param->thread_id, in_fd, peer_id);
+						}
+						handoff_in_fds[peer_id] = in_fd;
+						memset(&event, 0 , sizeof(event));
+						event.data.fd = in_fd;
+						event.data.u32 = HANDOFF_IN_EVENT;
+						event.events = EPOLLIN;
+						if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &in_event) == -1) {
+							perror("epoll_ctl");
+							exit(EXIT_FAILURE);
+						}
+					} else {
+						printf("Thread %d unhanlded event on handoff_in_eventfd (events %d)\n",
+							param->thread_id, events[i].events);
 					}
-					handoff_in_fds[peer_id] = in_fd;
-					struct epoll_event in_event = {0};
-					in_event.data.fd = in_fd;
-					in_event.events = EPOLLIN;
-					if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &in_event) == -1) {
-						perror("epoll_ctl");
+				} else if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) ||
+					(!(events[i].events & EPOLLIN) && !(events[i].events & EPOLLOUT))) {
+					int i = 0, fd = events[i].data.fd;
+					for (; i < num_peers; i++)
+					{
+						if (fd == handoff_in_fds[i])
+							break;
+					}
+					if (i < num_peers) {
+						fprintf(stderr, "Thread %d handoff_in conn %d received"
+							" abnormal event and dropped (events %d osd id %d)\n",
+							param->thread_id, fd, events[i].events, osd_ids[i]);
+						handoff_in_fds[i] = 0;
+						if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL) == -1) {
+							if (errno != ENOENT) {
+								perror("epoll_ctl");
+								exit(EXIT_FAILURE);
+							}
+						}
+					} else {
+						fprintf(stderr, "Thread %d handoff_in conn %d received"
+							" abnormal event from unknown peer (events %d)\n",
+							param->thread_id, fd, events[i].events);
 						exit(EXIT_FAILURE);
 					}
-				} else {
+				} else if (events[i].events & EPOLLIN) {
+					// handle handoff request
+				} else if (events[i].events & EPOLLOUT) {
 
-					// handle
 				}
+			} else if (events[i].data.u32 == HANDOFF_OUT_EVENT) {
+				if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) ||
+					(!(events[i].events & EPOLLIN) && !(events[i].events & EPOLLOUT))) {
+
+				} else if (events[i].events & EPOLLIN) {
+					// handle handoff request
+				} else if (events[i].events & EPOLLOUT) {
+
+				}
+			} else {
+				fprintf(stderr, "Thread %d unhandled event (events %d data.u32 %d fd %d)\n",
+					param->thread_id, events[i].events, events[i].data.u32, events[i].data.fd);
 			}
 		}
 	}
@@ -633,12 +688,12 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 		}
 
 		for (n = 0; n < nfds; n++) {
-			if ((!(events[n].events & EPOLLIN) && !(events[n].events & EPOLLOUT))) {
-				if (events[n].data.fd == listen_fd) {
-					fprintf(stderr, "listen_fd returned invalid event %d\n", events[n].events);
+			if ((!(events[i].events & EPOLLIN) && !(events[i].events & EPOLLOUT))) {
+				if (events[i].data.fd == listen_fd) {
+					fprintf(stderr, "listen_fd returned invalid event %d\n", events[i].events);
 					exit(EXIT_FAILURE);
 				}
-				int i, j, fd = events[n].data.fd;
+				int i, j, fd = events[i].data.fd;
 				for (i = 0; i < nproc; i++)
 				{
 					for (j = 0; j < num_peers; j++)
@@ -655,11 +710,11 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 				}
 				printf("Disconnected handoff_in fd %d"
 					" (host %s, thread %d, osd_id %d, event %d, err %s)\n",
-					fd, osd_addr_strs[j], i, osd_ids[j], events[n].events, strerror(errno));
+					fd, osd_addr_strs[j], i, osd_ids[j], events[i].events, strerror(errno));
 				handoff_in_fds[i][j] = 0;
 				close(fd); // fd will be automatically removed from all epolls
 			}
-			else if (events[n].data.fd == listen_fd) {
+			else if (events[i].data.fd == listen_fd) {
 				struct sockaddr_in in_addr;
 				socklen_t in_len = sizeof(in_addr);
 				int in_fd = accept(listen_fd, (struct sockaddr *)&in_addr, &in_len);
@@ -701,7 +756,7 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 					handoff_in_fds[thread_id][osd_arr_index] = in_fd;
 					printf("Dispatch conn %d to thread %d\n", in_fd, thread_id);
 					uint64_t val = combine_ints_to_uint64(in_fd, osd_arr_index);
-					int ret = write(params[thread_id].handoff_accept_eventfd, &val, sizeof(val));
+					int ret = write(params[thread_id].handoff_in_eventfd, &val, sizeof(val));
 					if (ret != sizeof(uint64_t)) {
 						perror("write eventfd");
 						exit(EXIT_FAILURE);
@@ -722,7 +777,7 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 					close(in_fd);
 				}
 			} else {
-				printf("Unhanlded event fd %d event %d\n", events[n].data.fd, events[n].events);
+				printf("Unhanlded event fd %d event %d\n", events[i].data.fd, events[i].events);
 			}
 		}
 	}

@@ -43,6 +43,8 @@ static char *AMZ_REQUEST_ID = (char*)"tx000009a75d393f1564ec2-0065202454-3771-de
 
 struct http_client {
 	int epoll_fd;
+	// always set epoll.data.u32 to this value
+	uint32_t epoll_data_u32;
 	int fd;
 
 	int prval;

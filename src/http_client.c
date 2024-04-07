@@ -50,6 +50,7 @@ void send_client_data(struct http_client *client)
 	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
 		struct epoll_event event = {};
 		event.data.ptr = client;
+		event.data.u32 = client->epoll_data_u32;
 		event.events = EPOLLIN;
 		epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 	}
@@ -255,6 +256,7 @@ void send_response(struct http_client *client)
 {
 	struct epoll_event event = {};
 	event.data.ptr = client;
+	event.data.u32 = client->epoll_data_u32;
 	event.events = EPOLLOUT;
 	int ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 	assert(ret == 0);
@@ -432,6 +434,7 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	reset_http_client(client);
 
 	client->epoll_fd = epoll_fd;
+	client->epoll_data_u32 = 0;
 	client->fd = fd;
 	client->parser.data = client;
 
