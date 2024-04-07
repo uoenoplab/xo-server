@@ -351,7 +351,7 @@ static int ceph_config_parser(void* user, const char* section, const char* name,
 	strncpy(ifr.ifr_name , ifname , IFNAMSIZ - 1);
 	ioctl(fd, SIOCGIFADDR, &ifr);
 	close(fd);
-	my_ip_address = strdup(inet_ntoa(( (struct sockaddr_in *)&ifr.ifr_addr )->sin_addr));
+	my_ip_address = inet_ntoa(( (struct sockaddr_in *)&ifr.ifr_addr )->sin_addr);
 
 	if (strncmp(section, "osd", 3) == 0) {
 		char *id = strstr(section, ".");
@@ -474,11 +474,9 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	//close(server_fd);
 	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);
 
-	free(my_ip_address);
 	for (size_t i = 0; i < 65536; i++) {
 		if (osd_ips[i] != NULL) free(osd_ips[i]);
 	}

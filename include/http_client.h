@@ -10,11 +10,17 @@
 #include "md5.h"
 #include "util.h"
 
-#define MAX_FIELDS 32
 #define MAX_HTTP_CLIENTS 1000
 
 #define BUCKET_POOL "bucket_pool"
 #define DATA_POOL "data_pool"
+
+// including null char
+#define MAX_RESPONSE_SIZE 8193
+#define MAX_BUCKET_NAME_SIZE 64
+#define MAX_OBJECT_NAME_SIZE 1025
+#define MAX_FIELDS 32
+#define MAX_FIELDS_SIZE 4096
 
 enum http_expect { CONTINUE, NONE };
 
@@ -51,13 +57,11 @@ struct http_client {
 	ssize_t data_payload_sent;
 	ssize_t data_payload_size;
 	char *data_payload;
-	//char data_payload[4 * 1024 * 1024];
 
 	ssize_t response_sent;
 	ssize_t response_size;
 	//https://www.tutorialspoint.com/What-is-the-maximum-size-of-HTTP-header-values
-	char response[8192];
-	//char *response;
+	char response[MAX_RESPONSE_SIZE];
 
 	llhttp_t parser;
 	llhttp_settings_t settings;
@@ -65,16 +69,16 @@ struct http_client {
 	enum llhttp_method method;
 
 	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html
-	char bucket_name[64];
+	char bucket_name[MAX_BUCKET_NAME_SIZE];
 	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html
-	char object_name[1025];
+	char object_name[MAX_OBJECT_NAME_SIZE];
 
 	char *uri_str;
 	size_t uri_str_len;
 	//UriUriA uri;
 
-	char header_fields[MAX_FIELDS][4096];
-	char header_values[MAX_FIELDS][4096];
+	char header_fields[MAX_FIELDS][MAX_FIELDS_SIZE];
+	char header_values[MAX_FIELDS][MAX_FIELDS_SIZE];
 
 	size_t header_field_parsed;
 	size_t header_value_parsed;
@@ -111,13 +115,13 @@ struct http_client {
 		BIO *wbio; /* SSL writes to, we read from. */
 
 		int client_hello_check_off;
-		char client_hello_check_buf[3];
+		unsigned char client_hello_check_buf[3];
 
 		bool is_client_traffic_secret_set;
 		bool is_server_traffic_secret_set;
 
-		char client_traffic_secret[48];
-		char server_traffic_secret[48];
+		unsigned char client_traffic_secret[48];
+		unsigned char server_traffic_secret[48];
 	} tls;
 };
 
