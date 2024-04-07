@@ -39,8 +39,6 @@ struct http_client {
 	int epoll_fd;
 	int fd;
 
-	char *put_buf;
-
 	int prval;
 	rados_xattrs_iter_t iter;
 
@@ -53,18 +51,23 @@ struct http_client {
 	ssize_t data_payload_sent;
 	ssize_t data_payload_size;
 	char *data_payload;
+	//char data_payload[4 * 1024 * 1024];
 
 	ssize_t response_sent;
 	ssize_t response_size;
-	char *response;
+	//https://www.tutorialspoint.com/What-is-the-maximum-size-of-HTTP-header-values
+	char response[8192];
+	//char *response;
 
 	llhttp_t parser;
 	llhttp_settings_t settings;
 	enum http_expect expect;
 	enum llhttp_method method;
 
-	char *bucket_name;
-	char *object_name;
+	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html
+	char bucket_name[64];
+	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html
+	char object_name[1025];
 
 	char *uri_str;
 	size_t uri_str_len;
@@ -84,6 +87,7 @@ struct http_client {
 
 	size_t object_size;
 	size_t object_offset;
+	char *put_buf;
 
 	size_t http_payload_size;
 	bool chunked_upload;
