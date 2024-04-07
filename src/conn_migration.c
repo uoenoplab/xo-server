@@ -169,6 +169,8 @@ void conn_migration(struct http_client *client, int target_osd_id)
 		assert(ret == rcvq_len);
 	}
 
+	// TODO: serialize ktls
+
 	ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
 	assert(ret == 0);
 	close(client->fd);
@@ -215,6 +217,8 @@ void conn_migration(struct http_client *client, int target_osd_id)
 	free(proto_buf);
 	free(migration_info);
 	/* done with serialize */
+
+	// TODO: put serialized data into client, indicates serialize, rule persistency???
 
 	/* start to deserialize */
 	client->fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -275,6 +279,9 @@ void conn_migration(struct http_client *client, int target_osd_id)
 	assert(ret == 0);
 	ret = setsockopt(client->fd, IPPROTO_TCP, TCP_REPAIR, &dopt, sizeof(dopt));
 	assert(ret == 0);
+
+	// TODO: deserialize ktls
+
 	printf("Deserialized fd=%d\n", client->fd);
 	/* to serialize */
 

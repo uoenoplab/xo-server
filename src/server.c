@@ -243,6 +243,9 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 	client->bucket_io_ctx = bucket_io_ctx;
 	client->data_io_ctx = data_io_ctx;
 	do_llhttp_execute(client, client_data_buffer, bytes_received);
+
+	// TODO: we issue handoff request here if related flag in client detected
+	// need a queue to store handoff works?
 }
 
 // TODO
@@ -471,22 +474,26 @@ static void *conn_wait(void *arg)
 				}
 				else if (events[i].events & EPOLLIN) {
 					handle_client_data(epoll_fd, c, client_data_buffer, thread_id, &bucket_io_ctx, &data_io_ctx, ssl_ctx);
+				} else {
+					fprintf(stderr, "Thread %d S3_HTTP unhandled event (fd %d events %d)\n",
+						param->thread_id, events[i].data.fd, events[i].events);
 				}
 			} else if (events[i].data.u32 == HANDOFF_IN_EVENT) {
 				if (events[i].data.fd == param->handoff_in_eventfd) {
 					if (events[i].events & EPOLLIN) {
 						uint64_t val;
-						int in_fd, peer_id;
+						int in_fd, osd_arr_index;
 						read(param->handoff_in_eventfd, &val, sizeof(val));
-						split_uint64_to_ints(val, &in_fd, &peer_id);
-						printf("Thread %d received an new handoff client conn %d from peer %d\n",
-							param->thread_id, in_fd, peer_id);
-						if (handoff_in_fds[peer_id] != 0) {
+						split_uint64_to_ints(val, &in_fd, &osd_arr_index);
+						if (handoff_in_fds[osd_arr_index] == 0) {
+							printf("Thread %d HANDOFF_IN receives a new conn %d (osd id %d)\n",
+								param->thread_id, in_fd, osd_ids[osd_arr_index]);
+						} else {
 							// main thread will close old fd and cause global epoll list delete
-							fprintf(stderr, "Thread %d overwrite old client conn %d from peer %d\n",
-								param->thread_id, in_fd, peer_id);
+							printf("Thread %d HANDOFF_IN receives a new conn %d and overwrites old conn (osd id %d)\n",
+								param->thread_id, in_fd, osd_ids[osd_arr_index]);
 						}
-						handoff_in_fds[peer_id] = in_fd;
+						handoff_in_fds[osd_arr_index] = in_fd;
 						memset(&event, 0 , sizeof(event));
 						event.data.fd = in_fd;
 						event.data.u32 = HANDOFF_IN_EVENT;
@@ -496,11 +503,12 @@ static void *conn_wait(void *arg)
 							exit(EXIT_FAILURE);
 						}
 					} else {
-						printf("Thread %d unhanlded event on handoff_in_eventfd (events %d)\n",
+						printf("Thread %d HANDOFF_IN unhanlded event on eventfd (events %d)\n",
 							param->thread_id, events[i].events);
 					}
-				} else if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) ||
-					(!(events[i].events & EPOLLIN) && !(events[i].events & EPOLLOUT))) {
+				} else if ((events[i].events & EPOLLERR) ||
+						   (events[i].events & EPOLLHUP) ||
+						   (events[i].events & EPOLLRDHUP)){
 					int i = 0, fd = events[i].data.fd;
 					for (; i < num_peers; i++)
 					{
@@ -508,35 +516,53 @@ static void *conn_wait(void *arg)
 							break;
 					}
 					if (i < num_peers) {
-						fprintf(stderr, "Thread %d handoff_in conn %d received"
-							" abnormal event and dropped (events %d osd id %d)\n",
+						fprintf(stderr, "Thread %d HANDOFF_IN received err/hup event"
+							"on conn %d, closing this conn (events %d osd id %d)\n",
 							param->thread_id, fd, events[i].events, osd_ids[i]);
 						handoff_in_fds[i] = 0;
-						if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL) == -1) {
-							if (errno != ENOENT) {
-								perror("epoll_ctl");
-								exit(EXIT_FAILURE);
-							}
-						}
 					} else {
-						fprintf(stderr, "Thread %d handoff_in conn %d received"
-							" abnormal event from unknown peer (events %d)\n",
+						fprintf(stderr, "Thread %d HANDOFF_IN received err/hup event"
+							"on conn %d but this conn is not registered (events %d)\n",
 							param->thread_id, fd, events[i].events);
+					}
+					if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL) == -1) {
+						perror("epoll_ctl");
 						exit(EXIT_FAILURE);
 					}
+					close(fd);
 				} else if (events[i].events & EPOLLIN) {
-					// handle handoff request
+					// handle handoff request - another end will not send another
+					// request before current request is been acked
+					// 1. loop until whole request received
+					// 2. create a new http client, deserialze s3 client,
+					// create connect, setup ktls
+					// 3. change mod to epoll out and send back handoff done
 				} else if (events[i].events & EPOLLOUT) {
-
+					// handle handoff request reponse
+					// 1. loop until whole response sent
+					// 2. change to epoll in mode
+				} else {
+					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",
+						param->thread_id, events[i].data.fd, events[i].events);
 				}
 			} else if (events[i].data.u32 == HANDOFF_OUT_EVENT) {
-				if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) ||
-					(!(events[i].events & EPOLLIN) && !(events[i].events & EPOLLOUT))) {
-
-				} else if (events[i].events & EPOLLIN) {
-					// handle handoff request
+				if ((events[i].events & EPOLLERR) ||
+					(events[i].events & EPOLLHUP) ||
+					(events[i].events & EPOLLRDHUP)) {
+					// means current connection is broken, need reconnect if handoff_out
+					// request queue is not empty, otherwise just close the fd and set
+					// handoff_out_fds to 0
 				} else if (events[i].events & EPOLLOUT) {
+					// we have don't have a outstanding request to send, get one from queue
+					// , if queue emply delete itself from epoll and set in_epoll to false
 
+					// send until all request is sent out, if current request all sent out,
+					// switch to epollin to wait for handoff done response
+				} else if (events[i].events & EPOLLIN) {
+					// handle handoff response, if all received, then swtich back to epollout
+				} else {
+					fprintf(stderr, "Thread %d HANDOFF_OUT unhandled event (fd %d events %d)\n",
+						param->thread_id, events[i].data.fd, events[i].events);
 				}
 			} else {
 				fprintf(stderr, "Thread %d unhandled event (events %d data.u32 %d fd %d)\n",
