@@ -65,6 +65,7 @@ static int on_header_field_cb(llhttp_t *parser, const char *at, size_t length)
 		client->header_value_parsed = 0;
 	}
 
+	assert(client->header_field_parsed + length < MAX_LENGTH_SIZE);
 	memcpy(&(client->header_fields[client->num_fields][client->header_field_parsed]), at, length);
 	client->header_field_parsed += length;
 	return 0;
@@ -103,6 +104,7 @@ static int on_url_cb(llhttp_t *parser, const char *at, size_t length)
 	struct http_client *client = (struct http_client*)parser->data;
 
 	client->uri_str = realloc(client->uri_str, client->uri_str_len + length);
+	assert(client->uri_str != NULL);
 	memcpy(client->uri_str + client->uri_str_len, at, length);
 	client->uri_str_len += length;
 
@@ -118,31 +120,40 @@ static int on_url_complete_cb(llhttp_t* parser)
 	UriUriA uri;
 
 	client->uri_str = realloc(client->uri_str, client->uri_str_len + 1);
+	assert(client->uri_str != NULL);
 	client->uri_str[client->uri_str_len] = '\0';
 
 	// if url bigger than something, return 414 Too long request
 
 	char *tmp_url = malloc(sizeof(char) * (client->uri_str_len + 1));
+	assert(tmp_url != NULL);
 	memcpy(tmp_url, client->uri_str, client->uri_str_len);
 	tmp_url[client->uri_str_len] = '\0';
+
 	char *rest = tmp_url;
 	char *token = strtok_r(rest, "/", &rest);
+	size_t token_len = 0;
 
 	if (token != NULL) {
 		const char *bucket_name_end = strstr(token, "?");
 		if (bucket_name_end != NULL) {
-			memcpy(client->bucket_name, token, bucket_name_end - token);
-			client->bucket_name[bucket_name_end - token] = '\0';
+			token_len = bucket_name_end - token;
+			assert(token_len < MAX_BUCKET_NAME_SIZE);
+
+			memcpy(client->bucket_name, token, token_len);
+			client->bucket_name[token_len] = '\0';
 		}
 		else {
-			memcpy(client->bucket_name, token, strlen(token));
-			client->bucket_name[strlen(token)] = '\0';
+			token_len = strlen(token);
+			assert(token_len < MAX_BUCKET_NAME_SIZE);
+			snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, "%s", token);
 		}
 
 		token = strtok_r(NULL, "/", &rest);
 		if (token != NULL) {
-			strncpy(client->object_name, token, strlen(token));
-			client->object_name[strlen(token)] = '\0';
+			token_len = strlen(token);
+			assert(token_len < MAX_OBJECT_NAME_SIZE);
+			snprintf(client->object_name, MAX_OBJECT_NAME_SIZE, "%s", token);
 		}
 	}
 
@@ -231,7 +242,7 @@ static int on_message_complete_cb(llhttp_t* parser)
 	else {
 		// DEBUG
 		client->response_size = snprintf(NULL, 0, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str) + 1;
-		//client->response = malloc(client->response_size);
+		assert(client->response_size <= MAX_RESPONSE_SIZE);
 		snprintf(client->response, client->response_size, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str);
 		client->response_size--;
 		send_response(client);
@@ -308,7 +319,7 @@ static int on_headers_complete_cb(llhttp_t* parser)
 		int itemCount;
 
 		UriUriA uri;
-		char errorPos;
+		const char *errorPos;
 		int ret = -1;
 
 		char *url = malloc(client->uri_str_len + 1);
@@ -316,7 +327,7 @@ static int on_headers_complete_cb(llhttp_t* parser)
 		url[client->uri_str_len] = '\0';
 
 		if ((ret = uriParseSingleUriA(&uri, url, &errorPos)) != URI_SUCCESS) {
-			fprintf(stderr, "Parse uri fail: %c\n", errorPos);
+			fprintf(stderr, "Parse uri fail: %s\n", errorPos);
 			return -1;
 		}
 

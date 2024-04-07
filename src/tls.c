@@ -75,7 +75,7 @@ void keylog_callback(const SSL *ssl, const char *line)
 	traffic_secret_start++;
 
 	if (strlen(traffic_secret_start) != 48 * 2) {
-		fprintf(stderr, "%s: secret incorrect length %d \"%s\"\n", __func__,
+		fprintf(stderr, "%s: secret incorrect length %ld \"%s\"\n", __func__,
 			strlen(traffic_secret_start), traffic_secret_start);
 		exit(EXIT_FAILURE);
 	}
