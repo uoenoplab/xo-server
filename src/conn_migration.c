@@ -10,6 +10,13 @@
 /* for repqair */
 
 #include "conn_migration.h"
+#include "proto/socket_serialize.pb-c.h"
+
+#define DATA 1
+#define CONTROL 2
+#define HANDOFF_MSG 3
+#define READY_MSG 4
+#define END_MSG 5
 
 #define USE_TFM 1
 #define TFM_DESC 1
@@ -166,6 +173,47 @@ void conn_migration(struct http_client *client, int target_osd_id)
 	assert(ret == 0);
 	close(client->fd);
 	printf("Serialized fd=%d\n", client->fd);
+
+	SocketSerialize* migration_info = (SocketSerialize*)malloc(sizeof(SocketSerialize));
+	socket_serialize__init(migration_info);
+	migration_info->msg_type = HANDOFF_MSG; 
+
+	////tls variable setting up  
+	//migration_info->buf.len = tls_export_context_size;
+	////printf("migration_info->buf.len = tls_export_context_size = %ld\n", tls_export_context_size);
+	//migration_info->buf.data = tls_export_buf; 
+	////printf("migration_info->buf.data = %s\n", migration_info->buf.data);
+
+	//tcp variable setting up
+	migration_info->sendq_len = sndq_len;
+	//migration_info->unsentq_len = unsentq_len; ????
+	migration_info->recvq_len = rcvq_len;
+	migration_info->mss = mss;
+	migration_info->timestamp = ts;
+	migration_info->send_wscale = info.tcpi_snd_wscale;
+	migration_info->recv_wscale = info.tcpi_rcv_wscale;
+	migration_info->snd_wl1 = window.snd_wl1;
+	migration_info->snd_wnd = window.snd_wnd;
+	migration_info->max_window = window.max_window;
+	migration_info->rev_wnd = window.rcv_wnd;
+	migration_info->rev_wup = window.rcv_wup;
+	migration_info->self_addr = sin.sin_addr.s_addr;
+	migration_info->self_port = sin.sin_port;
+	migration_info->peer_addr = sin2.sin_addr.s_addr;
+	migration_info->peer_port = sin2.sin_port;
+	migration_info->seq = seqno_send;
+	migration_info->ack = seqno_recv;
+	migration_info->sendq.len = sndq_len;
+	migration_info->sendq.data = sndbuf;
+	migration_info->recvq.len = rcvq_len; 
+	migration_info->recvq.data = rcvbuf;
+
+	//pack connection information 
+	size_t proto_len = socket_serialize__get_packed_size(migration_info); 
+	uint8_t *proto_buf = malloc(proto_len); 
+	socket_serialize__pack(migration_info, proto_buf);
+	free(proto_buf);
+	free(migration_info);
 	/* done with serialize */
 
 	/* start to deserialize */

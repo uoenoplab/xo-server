@@ -43,6 +43,7 @@ find_package(uriparser REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(INIH REQUIRED inih)
+pkg_check_modules(PROTOBUF-C REQUIRED libprotobuf-c)
 
 find_program(Protobuf_PROTOC-C_EXECUTABLE
     NAMES protoc-c
@@ -91,6 +92,7 @@ target_include_directories(server.out PUBLIC
 target_link_libraries(server.out PUBLIC
     http_server
     ${INIH_LIBRARIES}
+    ${PROTOBUF-C_LIBRARIES}
     OpenSSL::Crypto
     OpenSSL::SSL)
 set_target_properties(server.out PROPERTIES

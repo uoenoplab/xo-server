@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-message info_to_migrate {
+message socket_serialize {
         //tls info: depends on tlse serialization
         bytes buf = 1;
         //tcp info
