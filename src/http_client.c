@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <time.h>
+#include <string.h>
 
 #include <errno.h>
 #include <sys/epoll.h>
@@ -8,6 +9,7 @@
 #include "http_client.h"
 #include "object_store.h"
 #include "conn_migration.h"
+#include "osd_mapping.h"
 
 void send_client_data(struct http_client *client)
 {
@@ -117,50 +119,82 @@ static int on_url_complete_cb(llhttp_t* parser)
 
 	client->uri_str = realloc(client->uri_str, client->uri_str_len + 1);
 	client->uri_str[client->uri_str_len] = '\0';
-	if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
-		 fprintf(stderr, "Parse uri fail: %d\n", errorPos);
-		 return -1;
-	}
 
-	if (uri.pathHead != NULL) {
-		size_t bucket_name_len = uri.pathHead->text.afterLast - uri.pathHead->text.first;
-		if (bucket_name_len > 0) {
-			client->bucket_name = malloc(bucket_name_len + 1);
-			memcpy(client->bucket_name, uri.pathHead->text.first, bucket_name_len);
-			client->bucket_name[bucket_name_len] = '\0';
-			unescapeHtml(client->bucket_name);
+	// if url bigger than something, return 414 Too long request
 
-			if (uri.pathHead->next != NULL && uri.pathHead->next->text.afterLast - uri.pathHead->next->text.first > 0) {
-				// calculate total length
-				size_t object_name_len = 0;
-				size_t num_segments = 0;
-				size_t off = 0;
-				UriPathSegmentA *segment;
+	char *tmp_url = malloc(sizeof(char) * (client->uri_str_len + 1));
+	memcpy(tmp_url, client->uri_str, client->uri_str_len);
+	tmp_url[client->uri_str_len] = '\0';
+	char *rest = tmp_url;
+	char *token = strtok_r(rest, "/", &rest);
 
-				for (segment = uri.pathHead->next, num_segments = 0; segment != NULL; segment = segment->next, num_segments++) {
-					object_name_len += segment->text.afterLast - segment->text.first;
-				}
+	if (token != NULL) {
+		const char *bucket_name_end = strstr(token, "?");
+		if (bucket_name_end != NULL) {
+			memcpy(client->bucket_name, token, bucket_name_end - token);
+			client->bucket_name[bucket_name_end - token] = '\0';
+		}
+		else {
+			memcpy(client->bucket_name, token, strlen(token));
+			client->bucket_name[strlen(token)] = '\0';
+		}
 
-				// object scope exists
-				if (num_segments > 0) {
-					object_name_len += num_segments;
-					object_name_len -=1;
-					client->object_name = malloc(sizeof(char) * object_name_len + 1);
-					for (segment = uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
-						size_t len = segment->text.afterLast - segment->text.first;
-						memcpy(client->object_name + off, segment->text.first, len);
-						off += len;
-						*(client->object_name + off++) = '/';
-					}
-					client->object_name[object_name_len] = '\0';
-					unescapeHtml(client->object_name);
-				}
-			}
+		token = strtok_r(NULL, "/", &rest);
+		if (token != NULL) {
+			strncpy(client->object_name, token, strlen(token));
+			client->object_name[strlen(token)] = '\0';
 		}
 	}
 
-	if (ret == URI_SUCCESS)
-		uriFreeUriMembersA(&uri);
+	free(tmp_url);
+
+//	if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
+//		 fprintf(stderr, "Parse uri fail: %d\n", errorPos);
+//		 return -1;
+//	}
+//
+//	if (uri.pathHead != NULL) {
+//		size_t bucket_name_len = uri.pathHead->text.afterLast - uri.pathHead->text.first;
+//		if (bucket_name_len > 0) {
+//			//client->bucket_name = malloc(bucket_name_len + 1);
+//			// TODO if bucket name > 64 char return error
+//			memcpy(client->bucket_name, uri.pathHead->text.first, bucket_name_len);
+//			client->bucket_name[bucket_name_len] = '\0';
+//			unescapeHtml(client->bucket_name);
+//
+//			if (uri.pathHead->next != NULL && uri.pathHead->next->text.afterLast - uri.pathHead->next->text.first > 0) {
+//				// calculate total length
+//				size_t object_name_len = 0;
+//				size_t num_segments = 0;
+//				size_t off = 0;
+//				UriPathSegmentA *segment;
+//
+//				for (segment = uri.pathHead->next, num_segments = 0; segment != NULL; segment = segment->next, num_segments++) {
+//					object_name_len += segment->text.afterLast - segment->text.first;
+//				}
+//
+//				// object scope exists
+//				if (num_segments > 0) {
+//					object_name_len += num_segments;
+//					object_name_len -=1;
+//					// TODO if object name > 1024 char return error
+//					//client->object_name = malloc(sizeof(char) * object_name_len + 1);
+//					for (segment = uri.pathHead->next, off = 0; segment != NULL; segment = segment->next) {
+//						size_t len = segment->text.afterLast - segment->text.first;
+//						memcpy(client->object_name + off, segment->text.first, len);
+//						off += len;
+//						*(client->object_name + off++) = '/';
+//					}
+//					client->object_name[object_name_len] = '\0';
+//					unescapeHtml(client->object_name);
+//				}
+//			}
+//		}
+//		uriFreeUriMembersA(&uri);
+//	}
+//
+//	//if (ret == URI_SUCCESS)
+//	//	uriFreeUriMembersA(&uri);
 
 	return 0;
 }
@@ -176,8 +210,8 @@ static int on_message_complete_cb(llhttp_t* parser)
 
 	struct http_client *client = (struct http_client*)parser->data;
 
-	char datetime_str[128];
-	get_datetime_str(datetime_str, 128);
+	char datetime_str[256];
+	get_datetime_str(datetime_str, 256);
 
 	if (client->method == HTTP_HEAD) {
 		complete_head_request(client, datetime_str);
@@ -197,7 +231,7 @@ static int on_message_complete_cb(llhttp_t* parser)
 	else {
 		// DEBUG
 		client->response_size = snprintf(NULL, 0, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str) + 1;
-		client->response = malloc(client->response_size);
+		//client->response = malloc(client->response_size);
 		snprintf(client->response, client->response_size, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, datetime_str);
 		client->response_size--;
 		send_response(client);
@@ -255,6 +289,18 @@ static int on_headers_complete_cb(llhttp_t* parser)
 	}
 	else if (client->method == HTTP_GET) {
 		/* retrieve obj from OSD */
+		if (strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
+			/* check if we want to migrate */
+			int acting_primary_osd_id = -1;
+			ret = rados_get_object_osd_position(*(client->data_io_ctx), client->object_name, &acting_primary_osd_id);
+			assert(ret == 0);
+			if (my_osd_id == acting_primary_osd_id) {
+				printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
+				conn_migration(client, acting_primary_osd_id);
+			}
+		}
+
+
 		init_object_get_request(client);
 	}
 	else if (client->method == HTTP_POST) {
@@ -309,39 +355,33 @@ void reset_http_client(struct http_client *client)
 	client->expect = NONE;
 
 	client->uri_str_len = 0;
+	memset(client->bucket_name, 0, 64);
+	memset(client->object_name, 0, 1025);
 
-	if (client->bucket_name != NULL)  {
-		free(client->bucket_name);
-		client->bucket_name = NULL;
-	}
-
-	if (client->object_name != NULL)  {
-		free(client->object_name);
-		client->object_name = NULL;
-	}
-
-	if (client->put_buf != NULL)  {
-		free(client->put_buf);
-		client->put_buf = NULL;
+//	if (client->put_buf != NULL)  {
+//		free(client->put_buf);
+//		client->put_buf = NULL;
 		client->object_offset = 0;
-	}
+//	}
 
-	if (client->response != NULL) {
-		free(client->response);
-		client->response = NULL;
-		client->response_size = 0;
-		client->response_sent = 0;
-	}
+	client->response_size = 0;
+	client->response_sent = 0;
+	//if (client->response != NULL) {
+	//	free(client->response);
+	//	client->response = NULL;
+	//	client->response_size = 0;
+	//	client->response_sent = 0;
+	//}
 
 	//memset(client->data_payload, 0, 1024*1024*4);
-	//client->data_payload_size = 0;
-	//client->data_payload_sent = 0;
-	if (client->data_payload != NULL) {
-		free(client->data_payload);
-		client->data_payload = NULL;
-		client->data_payload_size = 0;
-		client->data_payload_sent = 0;
-	}
+	client->data_payload_size = 0;
+	client->data_payload_sent = 0;
+	//if (client->data_payload != NULL) {
+	//	free(client->data_payload);
+	//	client->data_payload = NULL;
+	//	client->data_payload_size = 0;
+	//	client->data_payload_sent = 0;
+	//}
 
 	client->prval = 0;
 	client->object_size = 0;
@@ -374,11 +414,9 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	client->settings.on_reset = on_reset_cb;
 	client->settings.on_body = on_body_cb;
 
-	client->put_buf = NULL;
-	client->data_payload = NULL;
-	client->bucket_name = NULL;
-	client->object_name = NULL;
-	client->response = NULL;
+	client->put_buf = malloc(0);
+	client->data_payload = malloc(0);
+	//client->response = NULL;
 	client->uri_str = malloc(0);
 	reset_http_client(client);
 
@@ -420,6 +458,8 @@ void free_http_client(struct http_client *client)
 //	free(client->header_fields);
 //	free(client->header_values);
 	free(client->uri_str);
+	free(client->data_payload);
+	free(client->put_buf);
 
 	rados_aio_release(client->aio_head_read_completion);
 	rados_aio_release(client->aio_completion);

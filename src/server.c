@@ -302,7 +302,7 @@ static void *conn_wait(void *arg)
 		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 		if (event_count == -1) {
 			if (errno == EINTR) {
-				printf("EINTR\n");
+				//printf("EINTR\n");
 				continue;
 			}
 			else {
