@@ -8,8 +8,8 @@
 
 #include "http_client.h"
 #include "object_store.h"
-#include "conn_migration.h"
 #include "osd_mapping.h"
+#include "handoff.h"
 
 void send_client_data(struct http_client *client)
 {
@@ -50,7 +50,7 @@ void send_client_data(struct http_client *client)
 	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
 		struct epoll_event event = {};
 		event.data.ptr = client;
-		event.data.u32 = client->epoll_data_u32;
+		//event.data.u32 = client->epoll_data_u32;
 		event.events = EPOLLIN;
 		epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 	}
@@ -256,7 +256,7 @@ void send_response(struct http_client *client)
 {
 	struct epoll_event event = {};
 	event.data.ptr = client;
-	event.data.u32 = client->epoll_data_u32;
+	//event.data.u32 = client->epoll_data_u32;
 	event.events = EPOLLOUT;
 	int ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 	assert(ret == 0);
@@ -309,7 +309,7 @@ static int on_headers_complete_cb(llhttp_t* parser)
 			assert(ret == 0);
 			if (get_my_osd_id() == acting_primary_osd_id) {
 				printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
-				conn_migration(client, acting_primary_osd_id);
+				handle_handoff_out_send(client, acting_primary_osd_id);
 			}
 		}
 

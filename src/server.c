@@ -120,7 +120,6 @@ void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
 	event.events = EPOLLIN;
 	struct http_client *client = create_http_client(epoll_fd, new_socket);
 	client->epoll_data_u32 = S3_HTTP_EVENT;
-	event.data.u32 = S3_HTTP_EVENT;
 	event.data.ptr = client;
 
 	set_socket_non_blocking(new_socket);
@@ -251,9 +250,9 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 
 static void *conn_wait(void *arg)
 {
-	int handoff_in_fds[num_peers];
+	int handoff_in_fds[MAX_NUM_PEERS];
 	memset(handoff_in_fds, 0, sizeof(handoff_in_fds));
-	int handoff_out_fds[num_peers];
+	int handoff_out_fds[MAX_NUM_PEERS];
 	memset(handoff_out_fds, 0, sizeof(handoff_out_fds));
 
 	rados_ioctx_t bucket_io_ctx;
@@ -343,10 +342,9 @@ static void *conn_wait(void *arg)
 	// Add the server socket to the epoll event list
 	memset(&event, 0 , sizeof(event));
 	event.events = EPOLLIN;
-	struct http_client *server_client = create_http_client(server_fd, server_fd);
+	struct http_client *server_client = create_http_client(epoll_fd, server_fd);
 	server_client->epoll_data_u32 = S3_HTTP_EVENT;
 	event.data.ptr = server_client;
-	event.data.u32 = S3_HTTP_EVENT;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
 		perror("epoll_ctl");
 		exit(EXIT_FAILURE);
@@ -354,7 +352,7 @@ static void *conn_wait(void *arg)
 
 	while (server_running) {
 		// Wait for events using epoll
-		//memset(events, 0, sizeof(struct epoll_event) * MAX_EVENTS);
+		memset(events, 0, sizeof(struct epoll_event) * MAX_EVENTS);
 		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 		if (event_count == -1) {
 			if (errno == EINTR) {
@@ -368,7 +366,8 @@ static void *conn_wait(void *arg)
 		}
 
 		for (int i = 0; i < event_count; i++) {
-			if (events[i].data.u32 == S3_HTTP_EVENT) {
+			uint32_t epoll_data_u32 = *((uint32_t*)events[i].data.ptr);
+			if (epoll_data_u32 == S3_HTTP_EVENT) {
 				// Handle events using callback functions
 				struct http_client *c = (struct http_client *)events[i].data.ptr;
 				if (c->fd == server_fd) {
@@ -383,7 +382,9 @@ static void *conn_wait(void *arg)
 					fprintf(stderr, "Thread %d S3_HTTP unhandled event (fd %d events %d)\n",
 						param->thread_id, events[i].data.fd, events[i].events);
 				}
-			} else if (events[i].data.u32 == HANDOFF_IN_EVENT) {
+			} 
+			else if (epoll_data_u32 == HANDOFF_IN_EVENT) {
+				struct handoff_in *in = (struct handoff_in*)events[i].data.ptr;
 				if (events[i].data.fd == param->handoff_in_eventfd) {
 					if (events[i].events & EPOLLIN) {
 						uint64_t val;
@@ -399,10 +400,12 @@ static void *conn_wait(void *arg)
 								param->thread_id, in_fd, osd_ids[osd_arr_index]);
 						}
 						handoff_in_fds[osd_arr_index] = in_fd;
+						struct handoff_in *new_in = (struct handoff_in*)malloc(sizeof(struct handoff_in));
+						new_in->fd = in_fd;
+						new_in->epoll_data_u32 = HANDOFF_IN_EVENT;
 						memset(&event, 0 , sizeof(event));
-						event.data.fd = in_fd;
-						event.data.u32 = HANDOFF_IN_EVENT;
 						event.events = EPOLLIN;
+						event.data.ptr = new_in;
 						if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event) == -1) {
 							perror("epoll_ctl");
 							exit(EXIT_FAILURE);
@@ -414,7 +417,7 @@ static void *conn_wait(void *arg)
 				} else if ((events[i].events & EPOLLERR) ||
 						   (events[i].events & EPOLLHUP) ||
 						   (events[i].events & EPOLLRDHUP)){
-					int i = 0, fd = events[i].data.fd;
+					int i = 0, fd = events[i].data.fd; //in->fd;
 					for (; i < num_peers; i++)
 					{
 						if (fd == handoff_in_fds[i])
@@ -450,7 +453,7 @@ static void *conn_wait(void *arg)
 					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",
 						param->thread_id, events[i].data.fd, events[i].events);
 				}
-			} else if (events[i].data.u32 == HANDOFF_OUT_EVENT) {
+			} else if (epoll_data_u32 == HANDOFF_OUT_EVENT) {
 				if ((events[i].events & EPOLLERR) ||
 					(events[i].events & EPOLLHUP) ||
 					(events[i].events & EPOLLRDHUP)) {
@@ -470,8 +473,8 @@ static void *conn_wait(void *arg)
 						param->thread_id, events[i].data.fd, events[i].events);
 				}
 			} else {
-				fprintf(stderr, "Thread %d unhandled event (events %d data.u32 %d fd %d)\n",
-					param->thread_id, events[i].events, events[i].data.u32, events[i].data.fd);
+				fprintf(stderr, "Thread %d unhandled event (events %d data.u32 %d)\n",
+					param->thread_id, events[i].events, epoll_data_u32);
 			}
 		}
 	}
