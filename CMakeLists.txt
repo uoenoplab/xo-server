@@ -5,6 +5,7 @@ enable_language(C)
 include(FetchContent)
 
 include(${CMAKE_SOURCE_DIR}/cmake/modules/Findlibrados2.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/modules/FindProtobufC.cmake)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/modules")
 
 #option(BUILD_SHARED_LIBS "Build using shared libraries" OFF)
@@ -34,18 +35,33 @@ set(C_SRC
     src/util.c
 )
 
+#add_library(demo_protobuf ${PROTO_SRC} ${PROTO_HEAD})
+
 find_package(LibXml2 REQUIRED)
 find_package(librados2 REQUIRED)
 find_package(uriparser REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(INIH REQUIRED inih)
+pkg_check_modules(PROTOBUF-C REQUIRED libprotobuf-c)
+
+find_program(Protobuf_PROTOC-C_EXECUTABLE
+    NAMES protoc-c
+    DOC "The Google Protocol Buffers Compiler C"
+    PATHS
+    ${Protobuf_SRC_ROOT_FOLDER}/vsprojects/${_PROTOBUF_ARCH_DIR}Release
+    ${Protobuf_SRC_ROOT_FOLDER}/vsprojects/${_PROTOBUF_ARCH_DIR}Debug
+)
+mark_as_advanced(Protobuf_PROTOC-C_EXECUTABLE)
+PROTOBUF_GENERATE_C(PROTO_SRC PROTO_HEAD proto/socket_serialize.proto)
 
 # build benchmark library
 add_library(http_server STATIC
+    ${PROTO_SRC}
     ${C_SRC})
 target_include_directories(http_server PRIVATE
     include
+    ${CMAKE_CURRENT_BINARY_DIR} # for proto
     ${URIPARSER_INCLUDE_DIR}
     ${llhttp_SOURCE_DIR}/include
     ${LIBXML2_INCLUDE_DIR}
@@ -76,6 +92,7 @@ target_include_directories(server.out PUBLIC
 target_link_libraries(server.out PUBLIC
     http_server
     ${INIH_LIBRARIES}
+    ${PROTOBUF-C_LIBRARIES}
     OpenSSL::Crypto
     OpenSSL::SSL)
 set_target_properties(server.out PROPERTIES
