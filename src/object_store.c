@@ -111,7 +111,6 @@ void init_object_get_request(struct http_client *client)
 			assert(ret == 0);
 			if (get_my_osd_id() == acting_primary_osd_id) {
 				printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
-				conn_migration(client, acting_primary_osd_id);
 			}
 		}
 

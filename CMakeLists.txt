@@ -31,7 +31,6 @@ set(C_SRC
     src/http_client.c
     src/object_store.c
     src/handoff.c
-    src/conn_migration.c
     src/md5.c
     src/util.c
 )

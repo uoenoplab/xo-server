@@ -3,6 +3,7 @@ syntax = "proto3";
 message socket_serialize {
         //tls info: depends on tlse serialization
         bytes buf = 1;
+
         //tcp info
         uint64 seq = 2;
         uint64 ack = 3;
@@ -26,4 +27,11 @@ message socket_serialize {
         uint64 rev_wup = 21;
         int32 msg_type = 22;
         uint32 ctrl_src_port = 23;
+
+	// http client
+	int32 method = 24;
+	string bucket_name = 25;
+	string object_name = 26;
+	string uri_str = 27;
+	int64 object_size = 28;
 }
