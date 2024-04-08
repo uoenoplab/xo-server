@@ -18,11 +18,6 @@
 #define READY_MSG 4
 #define END_MSG 5
 
-#define USE_TFM 1
-#define TFM_DESC 1
-#define TLS_REEXPORTABLE 1
-#define WITH_KTLS 1
-
 #ifndef TCPOPT_MSS
 #define TCPOPT_MSS 2
 #endif
