@@ -24,7 +24,7 @@
 
 enum http_expect { CONTINUE, NONE };
 
-extern size_t BUF_SIZE;
+extern const size_t BUF_SIZE;
 
 typedef struct ssl_st SSL;
 typedef struct bio_st BIO;

@@ -178,12 +178,12 @@ void conn_migration(struct http_client *client, int target_osd_id)
 
 	SocketSerialize* migration_info = (SocketSerialize*)malloc(sizeof(SocketSerialize));
 	socket_serialize__init(migration_info);
-	migration_info->msg_type = HANDOFF_MSG; 
+	migration_info->msg_type = HANDOFF_MSG;
 
-	////tls variable setting up  
+	////tls variable setting up
 	//migration_info->buf.len = tls_export_context_size;
 	////printf("migration_info->buf.len = tls_export_context_size = %ld\n", tls_export_context_size);
-	//migration_info->buf.data = tls_export_buf; 
+	//migration_info->buf.data = tls_export_buf;
 	////printf("migration_info->buf.data = %s\n", migration_info->buf.data);
 
 	//tcp variable setting up
@@ -207,12 +207,12 @@ void conn_migration(struct http_client *client, int target_osd_id)
 	migration_info->ack = seqno_recv;
 	migration_info->sendq.len = sndq_len;
 	migration_info->sendq.data = sndbuf;
-	migration_info->recvq.len = rcvq_len; 
+	migration_info->recvq.len = rcvq_len;
 	migration_info->recvq.data = rcvbuf;
 
-	//pack connection information 
-	size_t proto_len = socket_serialize__get_packed_size(migration_info); 
-	uint8_t *proto_buf = malloc(proto_len); 
+	//pack connection information
+	size_t proto_len = socket_serialize__get_packed_size(migration_info);
+	uint8_t *proto_buf = malloc(proto_len);
 	socket_serialize__pack(migration_info, proto_buf);
 	free(proto_buf);
 	free(migration_info);

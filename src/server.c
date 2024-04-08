@@ -30,7 +30,7 @@ enum THREAD_EPOLL_EVENT {
 	S3_HTTP_EVENT,
 	HANDOFF_IN_EVENT,
 	HANDOFF_OUT_EVENT,
-}
+};
 
 // 0.  handle incoming conn
 // 1.  read
@@ -258,98 +258,99 @@ struct handoff_in {
 struct handoff_out {
 	int epoll_fd;
 	int fd;
-}
+};
 
-void handle_new_handoff_in(){}
+// void handle_new_handoff_in(){}
 
-// migration request from other nodes
-void handle_handoff_in_recv(){}
+// // migration request from other nodes
+// void handle_handoff_in_recv(){}
 
-// response to migration request from other nodes
-void handle_handoff_in_send(){}
+// // response to migration request from other nodes
+// void handle_handoff_in_send(){}
 
-// if we don't have a connection yet before send migration request to other node, need to create new connection
-void create_new_handoff_out(int epoll_fd, int *out_fd, int *fds_not_connected, int peer_id) {
-	*out_fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (*out_fd == -1) {
-		perror("socket");
-		exit(EXIT_FAILURE);
-	}
+// // if we don't have a connection yet before send migration request to other node, need to create new connection
+// void create_new_handoff_out(int epoll_fd, int *out_fd, int *fds_not_connected, int peer_id) {
+// 	*out_fd = socket(AF_INET, SOCK_STREAM, 0);
+// 	if (*out_fd == -1) {
+// 		perror("socket");
+// 		exit(EXIT_FAILURE);
+// 	}
 
-	set_socket_non_blocking(*out_fd);
+// 	set_socket_non_blocking(*out_fd);
 
-	if (connect(*out_fd, (struct sockaddr*)&peer_addrs[peer_id], sizeof(peer_addrs[peer_id])) == -1) {
-		if (errno != EINPROGRESS) {
-			perror("connect");
-			close(*out_fd);
-			exit(EXIT_FAILURE);
-		} else {
-			struct epoll_event event = {0};
-			event.data.fd = *out_fd;
-			event.data.u32 = HANDOFF_OUT_EVENT;
-			event.events = EPOLLOUT;
-			if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, *out_fd, &event) == -1) {
-				perror("epoll_ctl");
-				close(*out_fd);
-				exit(EXIT_FAILURE);
-			}
-		}
-	} else {
-		(*fds_not_connected)--;
-		printf("%s: Connected to peer %d, fds_not_connected %d\n", __func__, peer_id, *fds_not_connected);
-	}
-}
+// 	if (connect(*out_fd, (struct sockaddr*)&peer_addrs[peer_id], sizeof(peer_addrs[peer_id])) == -1) {
+// 		if (errno != EINPROGRESS) {
+// 			perror("connect");
+// 			close(*out_fd);
+// 			exit(EXIT_FAILURE);
+// 		} else {
+// 			struct epoll_event event = {0};
+// 			event.data.fd = *out_fd;
+// 			event.data.u32 = HANDOFF_OUT_EVENT;
+// 			event.events = EPOLLOUT;
+// 			if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, *out_fd, &event) == -1) {
+// 				perror("epoll_ctl");
+// 				close(*out_fd);
+// 				exit(EXIT_FAILURE);
+// 			}
+// 		}
+// 	} else {
+// 		(*fds_not_connected)--;
+// 		printf("%s: Connected to peer %d, fds_not_connected %d\n", __func__, peer_id, *fds_not_connected);
+// 	}
+// }
 
-// if new handoff_out connection is not connected immediately, it is put in epoll and we check when events comes,
-// if fail, we issue a connect again
-void handle_new_handoff_out(int epoll_fd, int event_fd, int out_fds[num_peers], int *fds_not_connected, int peer_id) {
-	int val;
-	socklen_t val_slen = sizeof(val);
-	if (getsockopt(event_fd, SOL_SOCKET, SO_ERROR, &val, &val_slen) < 0) {
-		perror("getsockopt");
-		close(event_fd);
-	} else if (val != 0) {
-		fprintf(stderr, "Connection failed: %s\n", strerror(val));
-		close(event_fd);
-	} else {
-		printf("fds_not_connected %d\n", *fds_not_connected);
-		(*fds_not_connected)--;
-		printf("%s: Connected to peer %d, fds_not_connected %d\n", __func__, peer_id, *fds_not_connected);
-		return;
-	}
+// // if new handoff_out connection is not connected immediately, it is put in epoll and we check when events comes,
+// // if fail, we issue a connect again
+// void handle_new_handoff_out(int epoll_fd, int event_fd, int out_fds[num_peers], int *fds_not_connected, int peer_id) {
+// 	int val;
+// 	socklen_t val_slen = sizeof(val);
+// 	if (getsockopt(event_fd, SOL_SOCKET, SO_ERROR, &val, &val_slen) < 0) {
+// 		perror("getsockopt");
+// 		close(event_fd);
+// 	} else if (val != 0) {
+// 		fprintf(stderr, "Connection failed: %s\n", strerror(val));
+// 		close(event_fd);
+// 	} else {
+// 		printf("fds_not_connected %d\n", *fds_not_connected);
+// 		(*fds_not_connected)--;
+// 		printf("%s: Connected to peer %d, fds_not_connected %d\n", __func__, peer_id, *fds_not_connected);
+// 		return;
+// 	}
 
-	// Sleep before retry
-	// sleep(1);
+// 	// Sleep before retry
+// 	// sleep(1);
 
-	if (peer_id != -1) {
-		int i;
-		for (i = 0; i < num_peers; i++)
-		{
-			if (event_fd == out_fds[i])
-				peer_id = i;
-				break;
-		}
-		if (i >= num_peers) {
-			printf("Unkown can-not-connect server conn %d\n", event_fd);
-			return;
-		}
-	}
+// 	if (peer_id != -1) {
+// 		int i;
+// 		for (i = 0; i < num_peers; i++)
+// 		{
+// 			if (event_fd == out_fds[i])
+// 				peer_id = i;
+// 				break;
+// 		}
+// 		if (i >= num_peers) {
+// 			printf("Unkown can-not-connect server conn %d\n", event_fd);
+// 			return;
+// 		}
+// 	}
 
-	out_fds[peer_id] = 0;
-	connect_to_peer(epoll_fd, &out_fds[peer_id], fds_not_connected, peer_id);
-}
+// 	out_fds[peer_id] = 0;
+// 	create_new_handoff_out(epoll_fd, &out_fds[peer_id], fds_not_connected, peer_id);
+// }
 
-// send migration request to other nodes
-void handle_handoff_out_send(){}
+// // send migration request to other nodes
+// void handle_handoff_out_send(){}
 
-// receive response of migration request this node sent
-void handle_handoff_out_recv(){}
+// // receive response of migration request this node sent
+// void handle_handoff_out_recv(){}
 
 static void *conn_wait(void *arg)
 {
-	int handoff_in_fds[num_peers] = { 0 };
-	int handoff_out_fds[num_peers] = { 0 };
-	int handoff_out_fds_not_connected = num_peers;
+	int handoff_in_fds[num_peers];
+	memset(handoff_in_fds, 0, sizeof(handoff_in_fds));
+	int handoff_out_fds[num_peers];
+	memset(handoff_out_fds, 0, sizeof(handoff_out_fds));
 
 	rados_ioctx_t bucket_io_ctx;
 	rados_ioctx_t data_io_ctx;
@@ -395,11 +396,11 @@ static void *conn_wait(void *arg)
 
 	// Add handoff_in eventfd into epoll
 	memset(&event, 0 , sizeof(event));
-	event.data.fd = targ->efd;
-	printf("thread %d eventfd %d\n", targ->id, targ->efd);
+	event.data.fd = param->handoff_in_eventfd;
+	printf("Thread %d HANDOFF_IN regiester eventfd %d\n", param->thread_id, param->handoff_in_eventfd);
 	event.events = EPOLLIN;
 	event.data.u32 = HANDOFF_IN_EVENT;
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, targ->efd, &event) == -1) {
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_eventfd, &event) == -1) {
 		perror("epoll_ctl: efd");
 		exit(EXIT_FAILURE);
 	}
@@ -498,7 +499,7 @@ static void *conn_wait(void *arg)
 						event.data.fd = in_fd;
 						event.data.u32 = HANDOFF_IN_EVENT;
 						event.events = EPOLLIN;
-						if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &in_event) == -1) {
+						if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event) == -1) {
 							perror("epoll_ctl");
 							exit(EXIT_FAILURE);
 						}
@@ -697,6 +698,8 @@ int handoff_server_create_epoll(int listen_fd)
 		perror("epoll_ctl");
 		return -1;
 	}
+
+	return epoll_fd;
 }
 
 void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params[], const int nproc)
@@ -714,12 +717,12 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 		}
 
 		for (n = 0; n < nfds; n++) {
-			if ((!(events[i].events & EPOLLIN) && !(events[i].events & EPOLLOUT))) {
-				if (events[i].data.fd == listen_fd) {
-					fprintf(stderr, "listen_fd returned invalid event %d\n", events[i].events);
+			if ((!(events[n].events & EPOLLIN) && !(events[n].events & EPOLLOUT))) {
+				if (events[n].data.fd == listen_fd) {
+					fprintf(stderr, "listen_fd returned invalid event %d\n", events[n].events);
 					exit(EXIT_FAILURE);
 				}
-				int i, j, fd = events[i].data.fd;
+				int i, j, fd = events[n].data.fd;
 				for (i = 0; i < nproc; i++)
 				{
 					for (j = 0; j < num_peers; j++)
@@ -736,11 +739,11 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 				}
 				printf("Disconnected handoff_in fd %d"
 					" (host %s, thread %d, osd_id %d, event %d, err %s)\n",
-					fd, osd_addr_strs[j], i, osd_ids[j], events[i].events, strerror(errno));
+					fd, osd_addr_strs[j], i, osd_ids[j], events[n].events, strerror(errno));
 				handoff_in_fds[i][j] = 0;
 				close(fd); // fd will be automatically removed from all epolls
 			}
-			else if (events[i].data.fd == listen_fd) {
+			else if (events[n].data.fd == listen_fd) {
 				struct sockaddr_in in_addr;
 				socklen_t in_len = sizeof(in_addr);
 				int in_fd = accept(listen_fd, (struct sockaddr *)&in_addr, &in_len);
@@ -767,7 +770,7 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 
 				int osd_arr_index = i;
 				int thread_id = -1;
-				for (int i = 0; i < WORKER_THREADS; i++)
+				for (int i = 0; i < nproc; i++)
 				{
 					// printf("handoff_in_fds[%d][%d] %d\n",
 					//     i, peer_id, handoff_in_fds[i][peer_id]);
@@ -798,12 +801,12 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 					// TODO: we should actually scan all handoff_in_fds here to
 					// check is any disconnect before this, otherwise cient
 					// shouldn't send a new connection?
-					printf("Redundant conn fd %d (host %s, port %d, peer_id %d)\n",
-						in_fd, peer_addrs_str[peer_id], ntohs(in_addr.sin_port), peer_id);
+					printf("Redundant conn fd %d (host %s, port %d, osd_id %d)\n",
+						in_fd, osd_addr_strs[osd_arr_index], ntohs(in_addr.sin_port), osd_arr_index);
 					close(in_fd);
 				}
 			} else {
-				printf("Unhanlded event fd %d event %d\n", events[i].data.fd, events[i].events);
+				printf("Unhanlded event fd %d event %d\n", events[n].data.fd, events[n].events);
 			}
 		}
 	}
@@ -895,13 +898,13 @@ int main(int argc, char *argv[])
 	sigaction(SIGUSR1, &sa, NULL);
 
 	// TODO: this word is abit confusing, to be fix
-	printf("Launching %ld threads\n", S3_HTTP_PORT, nproc);
+	printf("Launching %d threads\n", S3_HTTP_PORT, nproc);
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
 		//param[i].server_fd = server_fd;
 		param[i].cluster = &cluster;
-		param[i].efd = eventfd(0, 0);
-		if (param[i].efd == -1) {
+		param[i].handoff_in_eventfd = eventfd(0, 0);
+		if (param[i].handoff_in_eventfd == -1) {
 			perror("eventfd");
 			exit(EXIT_FAILURE);
 		}
