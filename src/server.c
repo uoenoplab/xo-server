@@ -707,6 +707,8 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 	int handoff_in_fds[nproc][num_peers];
 	memset(handoff_in_fds, 0, sizeof(handoff_in_fds));
 
+	printf("Starting receive handoff request on port %d\n", HANDOFF_CTRL_PORT);
+
 	struct epoll_event events[MAX_EVENTS];
 	int n, nfds;
 	while (server_running) {
@@ -897,8 +899,7 @@ int main(int argc, char *argv[])
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGUSR1, &sa, NULL);
 
-	// TODO: this word is abit confusing, to be fix
-	printf("Launching %d threads\n", S3_HTTP_PORT, nproc);
+	printf("Launching %d threads\n", nproc);
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
 		//param[i].server_fd = server_fd;
