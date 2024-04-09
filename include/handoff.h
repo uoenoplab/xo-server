@@ -34,6 +34,14 @@ struct handoff_in {
 	uint32_t epoll_data_u32;
 	int epoll_fd;
 	int fd;
+        int osd_arr_index;
+};
+
+struct handoff_out_req;
+
+struct handoff_out_queue {
+    struct handoff_out_req* front;
+    struct handoff_out_req* rear;
 };
 
 // TODO
@@ -41,24 +49,20 @@ struct handoff_out {
 	uint32_t epoll_data_u32;
 	int epoll_fd;
 	int fd;
+        bool is_fd_in_epoll;
+        int osd_arr_index;
+        struct handoff_out_queue *queue;
+        // handoff out request currently sending out, deququed from queue
+        struct http_client *client;
+        // receive buffer???
+        // uint8_t recv_buf[1024];
 };
 
-struct tcp_info_sub {
-        uint8_t tcpi_state;
-        uint8_t tcpi_ca_state;
-        uint8_t tcpi_retransmits;
-        uint8_t tcpi_probes;
-        uint8_t tcpi_backoff;
-        uint8_t tcpi_options;
-        uint8_t tcpi_snd_wscale : 4;
-        uint8_t tcpi_rcv_wscale : 4;
-};
-
-void handle_new_handoff_in();
-void handle_handoff_in_send();
-void create_new_handoff_out(int epoll_fd, int *out_fd, int *fds_not_connected, int peer_id);
-void handle_new_handoff_out(int epoll_fd, int event_fd, int *out_fds, int peer_count, int *fds_not_connected, int peer_id);
-void handle_handoff_out_recv(int epoll_fd, uint8_t *handoff_msg, size_t handoff_msg_len, struct http_client *client);
-void handle_handoff_out_send(struct http_client *client, int peer_osd_id);
+void handoff_out_connect(struct handoff_out *out_ctx);
+void handoff_out_reconnect(struct handoff_out *out_ctx);
+void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
+	struct handoff_out *out_ctx, int osd_arr_index);
+void handoff_out_send(struct handoff_out *out_ctx);
+void handoff_out_recv(struct handoff_out *out_ctx);
 
 #endif

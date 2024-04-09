@@ -307,9 +307,10 @@ static int on_headers_complete_cb(llhttp_t* parser)
 			int acting_primary_osd_id = -1;
 			ret = rados_get_object_osd_position(*(client->data_io_ctx), client->object_name, &acting_primary_osd_id);
 			assert(ret == 0);
-			if (get_my_osd_id() == acting_primary_osd_id) {
+			if (get_my_osd_id() != acting_primary_osd_id) {
 				printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
-				handle_handoff_out_send(client, acting_primary_osd_id);
+				client->to_migrate = acting_primary_osd_id;
+				return 0;
 			}
 		}
 
@@ -362,6 +363,13 @@ void reset_http_client(struct http_client *client)
 //		if (client->header_fields[i]) free(client->header_fields[i]);
 //		if (client->header_values[i]) free(client->header_values[i]);
 //	}
+
+	client->to_migrate = -1;
+	client->proto_buf_sent = 0;
+	client->proto_buf_len = 0;
+	if (client->proto_buf != NULL) {
+		free(client->proto_buf);
+	}
 
 	client->num_fields = 0;
 	client->expect = NONE;

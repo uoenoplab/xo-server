@@ -104,16 +104,6 @@ void init_object_get_request(struct http_client *client)
 
 	if (strlen(client->bucket_name) != 0 && strlen(client->object_name) != 0) {
 		/* retrieve obj from OSD */
-		if (strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
-			/* check if we want to migrate */
-			int acting_primary_osd_id = -1;
-			ret = rados_get_object_osd_position(*(client->data_io_ctx), client->object_name, &acting_primary_osd_id);
-			assert(ret == 0);
-			if (get_my_osd_id() == acting_primary_osd_id) {
-				printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
-			}
-		}
-
 		//client->data_payload = malloc(FIRST_READ_SIZE);
 		client->data_payload = realloc(client->data_payload, FIRST_READ_SIZE);
 		assert(client->data_payload != NULL);

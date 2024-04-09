@@ -125,6 +125,12 @@ struct http_client {
 		unsigned char client_traffic_secret[48];
 		unsigned char server_traffic_secret[48];
 	} tls;
+
+	// handoff
+	int to_migrate;
+	uint8_t *proto_buf;
+	uint32_t proto_buf_len;
+	uint32_t proto_buf_sent;
 };
 
 struct http_client *create_http_client(int epoll_fd, int fd);

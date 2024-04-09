@@ -21,6 +21,7 @@ FetchContent_MakeAvailable(llhttp)
 ExternalProject_Add(libforward-tc
     GIT_REPOSITORY https://github.com/uoenoplab/libforward-tc.git
     SOURCE_DIR libs/libforward-tc
+    UPDATE_DISCONNECTED true
     GIT_TAG main
     #BUILD_IN_SOURCE ON
     #CONFIGURE_COMMAND ./configure
