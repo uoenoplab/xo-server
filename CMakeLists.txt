@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(xo-server)
 enable_language(C)
 
+include(ExternalProject)
 include(FetchContent)
 
 include(${CMAKE_SOURCE_DIR}/cmake/modules/Findlibrados2.cmake)
@@ -10,17 +11,27 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/modules")
 
 #option(BUILD_SHARED_LIBS "Build using shared libraries" OFF)
 FetchContent_Declare(llhttp
-  URL "https://github.com/nodejs/llhttp/archive/refs/tags/release/v8.1.0.tar.gz")
+    URL "https://github.com/nodejs/llhttp/archive/refs/tags/release/v8.1.0.tar.gz")
 
 set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
 set(BUILD_STATIC_LIBS ON CACHE INTERNAL "")
 FetchContent_MakeAvailable(llhttp)
 
+# add libforward source
+ExternalProject_Add(libforward-tc
+    GIT_REPOSITORY https://github.com/uoenoplab/libforward-tc.git
+    SOURCE_DIR libs/libforward-tc
+    GIT_TAG main
+    #BUILD_IN_SOURCE ON
+    #CONFIGURE_COMMAND ./configure
+    #BUILD_COMMAND make -j 32
+    INSTALL_COMMAND "")
+
 ## Link with the llhttp_static target
 #target_link_libraries(${EXAMPLE_PROJECT_NAME} ${PROJECT_LIBRARIES} llhttp_static ${PROJECT_NAME})
 
 if (NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE "Debug")
+    set(CMAKE_BUILD_TYPE "Debug")
 endif()
 
 if (POLICY CMP0074)
@@ -55,48 +66,68 @@ find_program(Protobuf_PROTOC-C_EXECUTABLE
 mark_as_advanced(Protobuf_PROTOC-C_EXECUTABLE)
 PROTOBUF_GENERATE_C(PROTO_SRC PROTO_HEAD proto/socket_serialize.proto)
 
-# build benchmark library
+# build http server library
 add_library(http_server STATIC
     ${PROTO_SRC}
     ${C_SRC})
+
+add_dependencies(http_server libforward-tc)
+
+ExternalProject_Get_property(libforward-tc SOURCE_DIR)
 target_include_directories(http_server PRIVATE
     include
     ${CMAKE_CURRENT_BINARY_DIR} # for proto
+    ${SOURCE_DIR}/include
     ${URIPARSER_INCLUDE_DIR}
     ${llhttp_SOURCE_DIR}/include
     ${LIBXML2_INCLUDE_DIR}
     ${LIBRADOS2_INCLUDE_DIRS})
-target_link_libraries(http_server PRIVATE
+
+ExternalProject_Get_property(libforward-tc BINARY_DIR)
+target_link_directories(http_server PUBLIC
+    ${BINARY_DIR})
+
+target_link_libraries(http_server PUBLIC
     llhttp_static
     uriparser::uriparser
     LibXml2::LibXml2
     OpenSSL::Crypto
+    forward-tc
+    ${PROTOBUF-C_LIBRARIES}
     ${LIBRADOS2_LIBRARIES})
+
 set_target_properties(http_server PROPERTIES
-        POSITION_INDEPENDENT_CODE ON
-        C_STANDARD 11)
+    POSITION_INDEPENDENT_CODE ON
+    C_STANDARD 11)
+
 target_compile_options(http_server PRIVATE
-	-fstack-protector-all -Wall -Wextra -ggdb -O3 -g)
+    -fstack-protector-all -Wall -Wextra -ggdb -O3 -g)
 #-fsanitize=undefined,address -fno-omit-frame-pointer -fstack-protector -Wall -Wextra -ggdb -O3 -g)
 target_link_options(http_server PRIVATE
-	-fstack-protector-all -Wall -Wextra -ggdb -O3 -g)
+    -fstack-protector-all -Wall -Wextra -ggdb -O3 -g)
 #-fsanitize=undefined,address -fno-omit-frame-pointer -fstack-protector -Wall -Wextra -ggdb -O3 -g)
 
 # build driver application
 add_executable(server.out src/server.c src/tls.c)
+
+add_dependencies(server.out libforward-tc http_server)
+
 target_include_directories(server.out PUBLIC
     ${llhttp_SOURCE_DIR}/include
     ${INIH_INCLUDE_DIRS}
     ${LIBXML2_INCLUDE_DIR}
     include)
+
 target_link_libraries(server.out PUBLIC
+    llhttp_static
     http_server
     ${INIH_LIBRARIES}
-    ${PROTOBUF-C_LIBRARIES}
     OpenSSL::Crypto
     OpenSSL::SSL)
+
 set_target_properties(server.out PROPERTIES
     C_STANDARD 11)
+
 target_compile_options(server.out PRIVATE
     ${INIH_CFLAGS_OTHER}
     -fstack-protector-all -O3 -Wall -Wextra -g)
