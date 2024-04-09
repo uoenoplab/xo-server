@@ -77,8 +77,8 @@ static void handoff_out_enqueue(struct handoff_out_queue* queue, void *client)
 
 // caller have to check queue is empty before dequeue!!!
 static void handoff_out_dequeue(struct handoff_out_queue* queue, void **client) {
-    struct handoff_out_req* temp = queue->front;
-	*client = temp->c;
+    struct handoff_out_req* node = queue->front;
+	*client = node->c;
 
     queue->front = queue->front->next;
     // If front becomes NULL, then change rear also as NULL
@@ -86,22 +86,7 @@ static void handoff_out_dequeue(struct handoff_out_queue* queue, void **client) 
         queue->rear = NULL;
     }
 
-    free(temp);
-}
-
-// Example usage
-int main() {
-    struct migration_queue* queue = migration_create_queue();
-    migration_enqueue(queue, 10);
-    migration_enqueue(queue, 20);
-    printf("Dequeued: %d\n", migration_dequeue(queue));
-    printf("Dequeued: %d\n", migration_dequeue(queue));
-    if (migration_is_queue_empty(queue)) {
-        printf("Queue is empty\n");
-    } else {
-        printf("Queue is not empty\n");
-    }
-    return 0;
+    free(node);
 }
 
 static int
@@ -141,23 +126,17 @@ static void handoff_out_serialize(struct http_client *client)
 //#endif /* PROFILE */
 	ret = setsockopt(fd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
 	assert(ret == 0);
-#ifdef WITH_TLS
-	int tls_export_context_size = 0;
-	unsigned char tls_export_buf[0xFFFF];
 #ifdef PROFILE
 	clock_gettime(CLOCK_MONOTONIC, &start_time);
 #endif /* PROFILE */
-#ifdef WITH_KTLS
+#ifdef WITH_KTLS // TODO: ktls export
 	tls_unmake_ktls(fd_state[fd].tls_context, fd);
 	assert(ret == 0);
 #endif /* WITH_KTLS */
-	tls_export_context_size = tls_export_context(fd_state[fd].tls_context, tls_export_buf, sizeof(tls_export_buf), 1);
-	assert(tls_export_context_size > 0);
 #ifdef PROFILE
 	clock_gettime(CLOCK_MONOTONIC, &end_time);
 	printf("serialize tls: %lf\n", diff_timespec(&end_time, &start_time));
 #endif /* PROFILE */
-#endif /* WITH_TLS */
 	socklen_t slen = sizeof(info);
 	ret = getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &slen);
 	assert(ret == 0);
@@ -239,22 +218,10 @@ static void handoff_out_serialize(struct http_client *client)
 	ret = epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
 	assert(ret == 0);
 	close(fd);
-#ifdef WITH_TLS
-	if (fd_state[fd].tls_context) {
-		tls_destroy_context(fd_state[fd].tls_context);
-//		fd_state[fd].tls_context = NULL;
-	}
-#endif /* WITH_TLS */
 
 	/* pack & send handoff msg */
 	SocketSerialize migration_info = SOCKET_SERIALIZE__INIT;
-
-	migration_info.msg_type = HANDOFF_MSG;
-#ifdef WITH_TLS
-	//tls variables setting up
-	migration_info.buf.len= tls_export_context_size;
-	migration_info.buf.data = tls_export_buf;
-#endif /* WITH_TLS */
+	migration_info.msg_type = HANDOFF_REQUEST;
 	//tcp variables setting up
 	migration_info.sendq_len = sendq_len;
 	migration_info.unsentq_len = unsentq_len;
@@ -279,10 +246,12 @@ static void handoff_out_serialize(struct http_client *client)
 	migration_info.recvq.len = recvq_len;
 	migration_info.recvq.data = rcvbuf;
 
-	//sending length and message
-//	int ctrl_fd = (control_original_fds[worker_id] == 0) ? control_fake_fds[worker_id] : control_original_fds[worker_id];
-//	ssize_t len = write(ctrl_fd, combined_buf, proto_len + sizeof(net_proto_len));
-//	ast(len > 0, "write4", NULL);
+// TODO: serialize ktls
+#ifdef WITH_TLS
+	//tls variables setting up
+	migration_info.ktlsbuf.len = tls_export_context_size;
+	migration_info.ktlsbuf.data = tls_export_buf;
+#endif /* WITH_TLS */
 
 	// serialize http client
 	migration_info.method = client->method;
@@ -308,24 +277,26 @@ static void handoff_out_serialize(struct http_client *client)
 	client->proto_buf = proto_buf:
 	client->proto_buf_sent = 0;
 	client->proto_buf_len = sizeof(net_proto_len) + proto_len;
-	// send req to new server
-	// int epoll_fd = client->epoll_fd;
-	//free_http_client(client); // can't free it before hand off actually implemented
-	// handle_handoff_out_recv(epoll_fd, proto_buf, proto_len, client);
 
-	//
-	// wait for ready: where to impl this?
-	// - install redirection rule
 	free(migration_info.uri_str);
 	free(migration_info.object_name);
 	free(migration_info.bucket_name);
-	// free(proto_buf);
 }
 
 void handoff_out_connect(struct handoff_out *out_ctx) {
 	out_ctx->fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (out_ctx->fd == -1) {
 		perror("socket");
+		exit(EXIT_FAILURE);
+	}
+
+	if (setsockopt(out_ctx->fd, IPPROTO_TCP, TCP_QUICKACK, &(int){1}, sizeof(int)) == -1) {
+		perror("setsockopt TCP_QUICKACK");
+		exit(EXIT_FAILURE);
+	}
+
+	if (setsockopt(out_ctx->fd, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int)) == -1) {
+		perror("setsockopt TCP_NODELAY");
 		exit(EXIT_FAILURE);
 	}
 
@@ -428,8 +399,15 @@ void handoff_out_send(struct handoff_out *out_ctx)
 		return;
 	}
 
+	out_ctx->client->proto_buf_sent += ret;
+
 	// send done
 	if (out_ctx->client->proto_buf_len == out_ctx->client->proto_buf_sent) {
+		if (out_ctx->recv_protobuf != NULL) {
+			free(out_ctx->recv_protobuf);
+		}
+		out_ctx->recv_protobuf_len = 0;
+		out_ctx->recv_protobuf_received = 0;
 		struct epoll_event event = {0};
 		event.data.ptr = out_ctx;
 		event.events = EPOLLIN;
@@ -443,13 +421,32 @@ void handoff_out_send(struct handoff_out *out_ctx)
 
 void handoff_out_recv(struct handoff_out *out_ctx)
 {
-	int ret = -1;
-	/* unpack protobuf msg */
-	SocketSerialize *new_migration_info = socket_serialize__unpack(NULL, handoff_msg_len, handoff_msg);
-	assert(new_migration_info != NULL);
+	if (out_ctx->recv_protobuf == NULL) {
+		int ret = recv(out_ctx->fd, &out_ctx->recv_protobuf_len, sizeof(out_ctx->recv_protobuf_len), 0);
+		if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
+			perror("handoff_out_recv recv1");
+			handoff_out_reconnect(out_ctx);
+			return;
+		}
+		if (ret == -1 && errno == EAGAIN) {
+			return;
+		}
+		if (ret < sizeof(out_ctx->recv_protobuf_len)) {
+			fprintf(stderr, "%s: unable to handle the case TCP recv less than 4 bytes on header\n");
+			exit(EXIT_FAILURE);
+		}
+		out_ctx->recv_protobuf_len = ntohl(out_ctx->recv_protobuf_len);
+		if (out_ctx->recv_protobuf_len == 0) {
+			fprintf(stderr, "%s: out_ctx->recv_protobuf_len is zero\n");
+			exit(EXIT_FAILURE);
+		}
+		out_ctx->recv_protobuf = malloc(out_ctx->recv_protobuf_len);
+	}
 
+	int ret = recv(out_ctx->fd, out_ctx->recv_protobuf + out_ctx->recv_protobuf_received,
+		out_ctx->recv_protobuf_len - out_ctx->recv_protobuf_received, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
-		perror("handoff_out_recv recv");
+		perror("handoff_out_recv recv2");
 		handoff_out_reconnect(out_ctx);
 		return;
 	}
@@ -457,160 +454,323 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		return;
 	}
 
-};
+	out_ctx->recv_protobuf_received += ret;
+	if (out_ctx->recv_protobuf_received < out_ctx->recv_protobuf_len)
+		continue;
 
-// // receive response of migration request this node sent http_client to be removed
-// void handle_handoff_in_recv(int epoll_fd, uint8_t *handoff_msg, size_t handoff_msg_len, struct http_client *client)
-// {
-// 	int ret = -1;
-// 	/* unpack protobuf msg */
-// 	SocketSerialize *new_migration_info = socket_serialize__unpack(NULL, handoff_msg_len, handoff_msg);
-// 	assert(new_migration_info != NULL);
-// 	//free(msg_buf);
+	SocketSerialize *migration_info = socket_serialize__unpack(NULL,
+		out_ctx->recv_protobuf_len, out_ctx->recv_protobuf);
+	if (migration_info == NULL) {
+		fprintf(stderr, "%s: unable to unpack recv protobuf\n");
+		exit(EXIT_FAILURE);
+	}
+	if (migration_info->msg_type != HANDOFF_DONE) {
+		fprintf(stderr, "%s: can only handle HANDOFF_DONE msg\n");
+		exit(EXIT_FAILURE);
+	}
 
-// 	if (new_migration_info->msg_type == HANDOFF_MSG) {
-// 		int rfd;
-// 		struct sockaddr_in new_sin, new_sin2;
-// 		struct tcp_repair_window new_window;
+	free(out_ctx->recv_protobuf);
+	out_ctx->recv_protobuf = NULL;
+	out_ctx->recv_protobuf_len = 0;
+	out_ctx->recv_protobuf_received = 0;
 
-// 		struct TLSContext *imported_context;
+	free_http_client(out_ctx->client);
+	out_ctx->client = NULL;
 
-// #ifdef PROFILE
-// 		struct timespec start_time2, end_time2;
-// 		clock_gettime(CLOCK_MONOTONIC, &start_time2);
-// #endif
+	// TODO insert rule
 
-// 		/* restore tcp connection */
-// 		rfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-// 		assert(rfd > 0);
-// 		ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
-// 		assert(ret == 0);
-// 		ret = setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int));
-// 		assert(ret == 0);
-// 		ioctl(rfd, FIONBIO, &(int){1});
-// 		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
-// 		assert(ret == 0);
-// 		const int qid_snd = TCP_SEND_QUEUE;
-// 		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_QUEUE, &qid_snd, sizeof(qid_snd));
-// 		assert(ret == 0);
-// 		ret = setsockopt(rfd, IPPROTO_TCP, TCP_QUEUE_SEQ, &new_migration_info->seq, sizeof(new_migration_info->seq));
-// 		assert(ret == 0);
-// 		const int qid_rcv = TCP_RECV_QUEUE;
-// 		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_QUEUE, &qid_rcv, sizeof(qid_rcv));
-// 		assert(ret == 0);
-// 		ret = setsockopt(rfd, IPPROTO_TCP, TCP_QUEUE_SEQ, &new_migration_info->ack, sizeof(new_migration_info->ack));
-// 		assert(ret == 0);
 
-// 		new_sin.sin_family = AF_INET;
-// 		new_sin.sin_port = new_migration_info->self_port;
-// 		// ???
-// //		if (fd == control_fake_fds[worker_id])
-// //			new_sin.sin_addr.s_addr = inet_addr(fake_ip);
-// //		if (fd == control_original_fds[worker_id])
-// //			new_sin.sin_addr.s_addr = inet_addr(original_ip);
-// 		new_sin.sin_addr.s_addr = inet_addr(get_my_osd_addr_str());
-// 		new_sin2.sin_family = AF_INET;
-// 		new_sin2.sin_port = new_migration_info->peer_port;
-// 		new_sin2.sin_addr.s_addr = new_migration_info->peer_addr;
+	socket_serialize__free_unpacked(migration_info, NULL);
 
-// 		ret = bind(rfd, (struct sockaddr *)&new_sin, sizeof(new_sin));
-// 		assert(ret == 0);
-// 		ret = connect(rfd, (struct sockaddr *)&new_sin2, sizeof(new_sin2));
-// 		assert(ret == 0);
+	struct epoll_event event = {0};
+	event.data.ptr = out_ctx;
+	event.events = EPOLLOUT;
+	if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_MOD, out_ctx->fd, &event) == -1) {
+		perror("epoll_ctl");
+		close(out_ctx->fd);
+		exit(EXIT_FAILURE);
+	}
+}
 
-// 		socklen_t new_ulen = new_migration_info->unsentq_len;
-// 		socklen_t new_len = new_migration_info->sendq.len - new_ulen;
+void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
+{
+	int ret = -1;
 
-// 		if (new_len) {
-// 			ret = restore_queue(rfd, TCP_SEND_QUEUE, (const uint8_t *)new_migration_info->sendq.data, new_len, 1);
-// 			assert(ret == 0);
-// 		}
-// 		if (new_ulen) {
-// 			ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(-1));
-// 			assert(ret == 0);
-// 			ret = restore_queue(rfd, TCP_SEND_QUEUE, (const uint8_t *)new_migration_info->sendq.data + new_len, new_ulen, 0);
-// 			assert(ret == 0);
-// 			ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
-// 			assert(ret == 0);
-// 		}
-// 		if (new_migration_info->recvq.len > 0) {
-// 			ret = restore_queue(rfd, TCP_RECV_QUEUE, (const uint8_t *)new_migration_info->recvq.data, new_migration_info->recvq.len, 1);
-// 			assert(ret == 0);
-// 		}
+	if (new_migration_info->msg_type == HANDOFF_REQUEST) {
+		int rfd;
+		struct sockaddr_in new_sin, new_sin2;
+		struct tcp_repair_window new_window;
 
-// 		struct tcp_repair_opt opts[4];
-// 		bzero(opts, sizeof(opts));
-// 		opts[0].opt_code = TCPOPT_SACK_PERM;
-// 		opts[0].opt_val = 0;
-// 		opts[1].opt_code = TCPOPT_WINDOW;
-// 		opts[1].opt_val = new_migration_info->send_wscale + (new_migration_info->recv_wscale << 16);
-// 		opts[2].opt_code = TCPOPT_TIMESTAMP;
-// 		opts[2].opt_val = 0;
-// 		opts[3].opt_code = TCPOPT_MSS;
-// 		opts[3].opt_val = new_migration_info->mss;
+		struct TLSContext *imported_context;
 
-// 		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_OPTIONS, opts, sizeof(struct tcp_repair_opt) * 4);
-// 		assert(ret == 0);
-// 		ret = setsockopt(rfd, IPPROTO_TCP, TCP_TIMESTAMP, &new_migration_info->timestamp, sizeof(new_migration_info->timestamp));
-// 		assert(ret == 0);
+#ifdef PROFILE
+		struct timespec start_time2, end_time2;
+		clock_gettime(CLOCK_MONOTONIC, &start_time2);
+#endif
 
-// 		new_window.snd_wl1 = new_migration_info->snd_wl1;
-// 		new_window.snd_wnd = new_migration_info->snd_wnd;
-// 		new_window.max_window = new_migration_info->max_window;
-// 		new_window.rcv_wnd = new_migration_info->rev_wnd;
-// 		new_window.rcv_wup = new_migration_info->rev_wup;
+		/* restore tcp connection */
+		rfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		assert(rfd > 0);
+		ret = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
+		assert(ret == 0);
+		ret = setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int));
+		assert(ret == 0);
+		ioctl(rfd, FIONBIO, &(int){1});
+		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
+		assert(ret == 0);
+		const int qid_snd = TCP_SEND_QUEUE;
+		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_QUEUE, &qid_snd, sizeof(qid_snd));
+		assert(ret == 0);
+		ret = setsockopt(rfd, IPPROTO_TCP, TCP_QUEUE_SEQ, &new_migration_info->seq, sizeof(new_migration_info->seq));
+		assert(ret == 0);
+		const int qid_rcv = TCP_RECV_QUEUE;
+		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_QUEUE, &qid_rcv, sizeof(qid_rcv));
+		assert(ret == 0);
+		ret = setsockopt(rfd, IPPROTO_TCP, TCP_QUEUE_SEQ, &new_migration_info->ack, sizeof(new_migration_info->ack));
+		assert(ret == 0);
 
-// 		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &new_window, sizeof(new_window));
-// 		assert(ret == 0);
-// #ifdef WITH_TLS
-// #ifdef PROFILE
-// 		struct timespec start_time11, end_time11;
-// 		clock_gettime(CLOCK_MONOTONIC, &start_time11);
-// #endif /* PROFILE */
-// 		if (new_migration_info->buf.len > 0) {
-// 			imported_context = tls_import_context(new_migration_info->buf.data, new_migration_info->buf.len);
-// 			if (imported_context) {
-// 				fd_state[rfd].tls_context = imported_context;
-// 				tls_make_exportable(fd_state[rfd].tls_context, 1);
-// 			}
-// 			else {
-// 				perror("tls_import_context");
-// 				exit(0);
-// 			}
-// 		}
-// #ifdef WITH_KTLS
-// 		ret = tls_make_ktls(fd_state[rfd].tls_context, rfd);
-// 		assert(ret == 0);
-// #endif /* WITH_KTLS */
-// #ifdef PROFILE
-// 		//clock_gettime(CLOCK_MONOTONIC, &end_time11);
-// 		//printf("deserialize tls: %lf\n", diff_timespec(&end_time11, &start_time11));
-// #endif /* PROFILE */
-// #endif /* WITH_TLS */
+		new_sin.sin_family = AF_INET;
+		new_sin.sin_port = new_migration_info->self_port;
+		// ???
+//		if (fd == control_fake_fds[worker_id])
+//			new_sin.sin_addr.s_addr = inet_addr(fake_ip);
+//		if (fd == control_original_fds[worker_id])
+//			new_sin.sin_addr.s_addr = inet_addr(original_ip);
+		new_sin.sin_addr.s_addr = inet_addr(get_my_osd_addr_str());
+		new_sin2.sin_family = AF_INET;
+		new_sin2.sin_port = new_migration_info->peer_port;
+		new_sin2.sin_addr.s_addr = new_migration_info->peer_addr;
 
-// 		// cannot recreate it before actually implemented
-// 		//struct http_client *client = create_http_client(epoll_fd, rfd);
-// 		//snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, new_migration_info->bucket_name);
-// 		//snprintf(client->object_name, MAX_OBJECT_NAME_SIZE, new_migration_info->object_name);
-// 		//client->uri_str = realloc(client->uri_str, sizeof(char) * (strlen(new_migration_info->uri_str) + 1));
-// 		//snprintf(client->uri_str, strlen(new_migration_info->uri_str) + 1, new_migration_info->uri_str);
-// 		//client->object_size = new_migration_info->object_size;
-// 		//client->method = new_migration_info->method;
+		ret = bind(rfd, (struct sockaddr *)&new_sin, sizeof(new_sin));
+		assert(ret == 0);
+		ret = connect(rfd, (struct sockaddr *)&new_sin2, sizeof(new_sin2));
+		assert(ret == 0);
 
-// 		/* quiting repair mode */
-// 		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
-// 		assert(ret == 0);
-// 		struct epoll_event event = {};
-// 		client->fd = rfd;
-// 		event.data.ptr = client;
-// 		event.events = EPOLLIN;
-// 		ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
-// 		assert(ret == 0);
+		socklen_t new_ulen = new_migration_info->unsentq_len;
+		socklen_t new_len = new_migration_info->sendq.len - new_ulen;
 
-// 		// apply src IP modification
-// 		//
-// 		// send ready to original server
-// 	}
+		if (new_len) {
+			ret = restore_queue(rfd, TCP_SEND_QUEUE, (const uint8_t *)new_migration_info->sendq.data, new_len, 1);
+			assert(ret == 0);
+		}
+		if (new_ulen) {
+			ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(-1));
+			assert(ret == 0);
+			ret = restore_queue(rfd, TCP_SEND_QUEUE, (const uint8_t *)new_migration_info->sendq.data + new_len, new_ulen, 0);
+			assert(ret == 0);
+			ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
+			assert(ret == 0);
+		}
+		if (new_migration_info->recvq.len > 0) {
+			ret = restore_queue(rfd, TCP_RECV_QUEUE, (const uint8_t *)new_migration_info->recvq.data, new_migration_info->recvq.len, 1);
+			assert(ret == 0);
+		}
 
-// 	socket_serialize__free_unpacked(new_migration_info, NULL);
-// }
+		struct tcp_repair_opt opts[4];
+		bzero(opts, sizeof(opts));
+		opts[0].opt_code = TCPOPT_SACK_PERM;
+		opts[0].opt_val = 0;
+		opts[1].opt_code = TCPOPT_WINDOW;
+		opts[1].opt_val = new_migration_info->send_wscale + (new_migration_info->recv_wscale << 16);
+		opts[2].opt_code = TCPOPT_TIMESTAMP;
+		opts[2].opt_val = 0;
+		opts[3].opt_code = TCPOPT_MSS;
+		opts[3].opt_val = new_migration_info->mss;
+
+		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_OPTIONS, opts, sizeof(struct tcp_repair_opt) * 4);
+		assert(ret == 0);
+		ret = setsockopt(rfd, IPPROTO_TCP, TCP_TIMESTAMP, &new_migration_info->timestamp, sizeof(new_migration_info->timestamp));
+		assert(ret == 0);
+
+		new_window.snd_wl1 = new_migration_info->snd_wl1;
+		new_window.snd_wnd = new_migration_info->snd_wnd;
+		new_window.max_window = new_migration_info->max_window;
+		new_window.rcv_wnd = new_migration_info->rev_wnd;
+		new_window.rcv_wup = new_migration_info->rev_wup;
+
+		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &new_window, sizeof(new_window));
+		assert(ret == 0);
+#ifdef WITH_TLS
+#ifdef PROFILE
+		struct timespec start_time11, end_time11;
+		clock_gettime(CLOCK_MONOTONIC, &start_time11);
+#endif /* PROFILE */
+		if (new_migration_info->buf.len > 0) {
+			imported_context = tls_import_context(new_migration_info->buf.data, new_migration_info->buf.len);
+			if (imported_context) {
+				fd_state[rfd].tls_context = imported_context;
+				tls_make_exportable(fd_state[rfd].tls_context, 1);
+			}
+			else {
+				perror("tls_import_context");
+				exit(0);
+			}
+		}
+#ifdef WITH_KTLS
+		ret = tls_make_ktls(fd_state[rfd].tls_context, rfd);
+		assert(ret == 0);
+#endif /* WITH_KTLS */
+#ifdef PROFILE
+		//clock_gettime(CLOCK_MONOTONIC, &end_time11);
+		//printf("deserialize tls: %lf\n", diff_timespec(&end_time11, &start_time11));
+#endif /* PROFILE */
+#endif /* WITH_TLS */
+
+		// cannot recreate it before actually implemented
+		//struct http_client *client = create_http_client(epoll_fd, rfd);
+		//snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, new_migration_info->bucket_name);
+		//snprintf(client->object_name, MAX_OBJECT_NAME_SIZE, new_migration_info->object_name);
+		//client->uri_str = realloc(client->uri_str, sizeof(char) * (strlen(new_migration_info->uri_str) + 1));
+		//snprintf(client->uri_str, strlen(new_migration_info->uri_str) + 1, new_migration_info->uri_str);
+		//client->object_size = new_migration_info->object_size;
+		//client->method = new_migration_info->method;
+
+		/* quiting repair mode */
+		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
+		assert(ret == 0);
+		struct epoll_event event = {};
+		client->fd = rfd;
+		event.data.ptr = client;
+		event.events = EPOLLIN;
+		ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
+		assert(ret == 0);
+
+		// apply src IP modification
+		//
+		// send ready to original server
+	}
+}
+
+// handle handoff request - another end will not send another
+// request before current request is been acked
+// 1. loop until whole request received
+// 2. create a new http client, deserialze s3 client,
+// create connect, setup ktls
+// 3. change mod to epoll out and send back handoff done
+void handoff_in_recv(struct handoff_in *in_ctx) {
+	if (in_ctx->recv_protobuf == NULL) {
+		int ret = recv(in_ctx->fd, &in_ctx->recv_protobuf_len, sizeof(in_ctx->recv_protobuf_len), 0);
+		if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
+			perror("handoff_in_recv recv");
+			// main thread will handle actual close and new accept comein
+			if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_DEL, in_ctx->fd, NULL) == -1) {
+				perror("epoll_ctl");
+				exit(EXIT_FAILURE);
+			}
+			return;
+		}
+		if (ret == -1 && errno == EAGAIN) {
+			return;
+		}
+		if (ret < sizeof(in_ctx->recv_protobuf_len)) {
+			fprintf(stderr, "%s: unable to handle the case TCP recv less than 4 bytes on header\n");
+			exit(EXIT_FAILURE);
+		}
+		in_ctx->recv_protobuf_len = ntohl(in_ctx->recv_protobuf_len);
+		if (in_ctx->recv_protobuf_len == 0) {
+			fprintf(stderr, "%s: in_ctx->recv_protobuf_len is zero\n");
+			exit(EXIT_FAILURE);
+		}
+		in_ctx->recv_protobuf = malloc(in_ctx->recv_protobuf_len);
+	}
+
+	int ret = recv(in_ctx->fd, in_ctx->recv_protobuf + in_ctx->recv_protobuf_received,
+		in_ctx->recv_protobuf_len - in_ctx->recv_protobuf_received, 0);
+	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
+		perror("handoff_in_recv recv");
+		// main thread will handle actual close and new accept comein
+		if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_DEL, in_ctx->fd, NULL) == -1) {
+			perror("epoll_ctl");
+			exit(EXIT_FAILURE);
+		}
+		return;
+	}
+	if (ret == -1 && errno == EAGAIN) {
+		return;
+	}
+
+	SocketSerialize *migration_info = socket_serialize__unpack(NULL,
+		out_ctx->recv_protobuf_len, out_ctx->recv_protobuf);
+	if (migration_info == NULL) {
+		fprintf(stderr, "%s: unable to unpack recv protobuf\n");
+		exit(EXIT_FAILURE);
+	}
+	if (migration_info->msg_type != HANDOFF_REQUEST) {
+		fprintf(stderr, "%s: can only handle HANDOFF_REQUEST msg\n");
+		exit(EXIT_FAILURE);
+	}
+
+	free(in_ctx->recv_protobuf);
+	in_ctx->recv_protobuf = NULL;
+	in_ctx->recv_protobuf_len = 0;
+	in_ctx->recv_protobuf_received = 0;
+
+	// do deserialize
+	handoff_in_deserialize(in_ctx, migration_info);
+
+	// build response proto_buf
+	SocketSerialize migration_info_resp = SOCKET_SERIALIZE__INIT;
+	migration_info_resp->msg_type = HANDOFF_DONE;
+	migration_info_resp->self_addr = migration_info->self_addr;
+	migration_info_resp->peer_addr = migration_info->peer_addr;
+	migration_info_resp->self_port = migration_info->self_port;
+	migration_info_resp->peer_port = migration_info->peer_port;
+
+	// no longer need
+	socket_serialize__free_unpacked(migration_info, NULL);
+
+	size_t proto_len = socket_serialize__get_packed_size(&migration_info_resp);
+	uint32_t net_proto_len = htonl(proto_len);
+	uint8_t *proto_buf = malloc(sizeof(net_proto_len) + proto_len);
+	socket_serialize__pack(&migration_info_resp, proto_buf + sizeof(net_proto_len));
+	// add length of proto_buf at the begin
+	memcpy(proto_buf, &net_proto_len, sizeof(net_proto_len));
+
+	// change epoll to epollout
+	in_ctx->send_protobuf = proto_buf:
+	in_ctx->send_protobut_len = 0;
+	in_ctx->send_protobut_sent = sizeof(net_proto_len) + proto_len;
+	struct epoll_event event = {0};
+	event.data.ptr = in_ctx;
+	event.events = EPOLLOUT;
+	if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_MOD, in_ctx->fd, &event) == -1) {
+		perror("epoll_ctl");
+		close(out_ctx->fd);
+		exit(EXIT_FAILURE);
+	}
+}
+
+void handoff_in_send(struct handoff_in *in_ctx) {
+	int ret = send(in_ctx->fd, in_ctx->send_protobuf + in_ctx->send_protobuf_len,
+		in_ctx->send_protobuf_len - in_ctx->send_protobuf_sent, 0);
+	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
+		perror("handoff_in_send send");
+		// main thread will handle actual close and new accept comein
+		if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_DEL, in_ctx->fd, NULL) == -1) {
+			perror("epoll_ctl");
+			exit(EXIT_FAILURE);
+		}
+		return;
+	}
+	if (ret == -1 && errno == EAGAIN) {
+		return;
+	}
+
+	in_ctx->send_protobuf_sent += ret;
+
+	// send done
+	if (in_ctx->send_protobuf_sent == in_ctx->send_protobuf_len) {
+		if (in_ctx->send_protobuf != NULL) {
+			free(out_ctx->send_protobuf);
+		}
+		out_ctx->send_protobuf_len = 0;
+		out_ctx->send_protobuf_sent = 0;
+		struct epoll_event event = {0};
+		event.data.ptr = in_ctx;
+		event.events = EPOLLIN;
+		if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_MOD, in_ctx->fd, &event) == -1) {
+			perror("epoll_ctl");
+			exit(EXIT_FAILURE);
+		}
+	}
+}

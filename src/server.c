@@ -17,6 +17,7 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <ini.h>
+#include <netinet/tcp.h>
 
 #include "http_client.h"
 #include "tls.h"
@@ -412,6 +413,7 @@ static void *conn_wait(void *arg)
 						handoff_in_ctxs[osd_arr_index].osd_arr_index = osd_arr_index;
 						handoff_in_ctxs[osd_arr_index].epoll_data_u32 = HANDOFF_IN_EVENT;
 						memset(&event, 0 , sizeof(event));
+						// TODO maybe a reconnect socket, and we want to send HANDOFF_DONE immediately
 						event.events = EPOLLIN;
 						event.data.ptr = &handoff_in_ctxs[osd_arr_index];
 						if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event) == -1) {
@@ -429,19 +431,13 @@ static void *conn_wait(void *arg)
 						"on conn %d, closing this conn (events %d osd id %d)\n",
 						param->thread_id, in_ctx->fd, events[i].events, osd_ids[in_ctx->osd_arr_index]);
 					in_ctx->fd = 0;
-					close(fd);
-					// TODO: handle current recv state???!!!
+					close(in_ctx->fd);
+					// We don't handle recv state here since all we can do is
+					// wait main thread accept then trigger eventfd
 				} else if (events[i].events & EPOLLIN) {
-					// handle handoff request - another end will not send another
-					// request before current request is been acked
-					// 1. loop until whole request received
-					// 2. create a new http client, deserialze s3 client,
-					// create connect, setup ktls
-					// 3. change mod to epoll out and send back handoff done
+					handoff_in_recv(in_ctx);
 				} else if (events[i].events & EPOLLOUT) {
-					// handle handoff request reponse
-					// 1. loop until whole response sent
-					// 2. change to epoll in mode
+					handoff_in_send(in_ctx);
 				} else {
 					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",
 						param->thread_id, in_ctx->fd, events[i].events);
@@ -647,6 +643,16 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 				if (in_fd == -1) {
 					perror("accept");
 					break;
+				}
+
+				if (setsockopt(in_fd, IPPROTO_TCP, TCP_QUICKACK, &(int){1}, sizeof(int)) == -1) {
+					perror("setsockopt TCP_QUICKACK");
+					exit(EXIT_FAILURE);
+				}
+
+				if (setsockopt(in_fd, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int)) == -1) {
+					perror("setsockopt TCP_NODELAY");
+					exit(EXIT_FAILURE);
 				}
 
 				int i = -1;

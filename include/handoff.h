@@ -3,11 +3,10 @@
 
 #include "http_client.h"
 
-#define DATA 1
-#define CONTROL 2
-#define HANDOFF_MSG 3
-#define READY_MSG 4
-#define END_MSG 5
+enum {
+        HANDOFF_REQUEST,
+        HANDOFF_DONE
+}
 
 #ifndef TCPOPT_MSS
 #define TCPOPT_MSS 2
@@ -35,6 +34,12 @@ struct handoff_in {
 	int epoll_fd;
 	int fd;
         int osd_arr_index;
+        uint8_t *recv_protobuf;
+        uint32_t recv_protobuf_len;
+        uint32_t recv_protobuf_received;
+        uint8_t *send_protobuf;
+        uint32_t send_protobuf_len; // include header uint32 size
+        uint32_t send_protobuf_sent;
 };
 
 struct handoff_out_req;
@@ -55,6 +60,9 @@ struct handoff_out {
         // handoff out request currently sending out, deququed from queue
         struct http_client *client;
         // receive buffer???
+        uint8_t *recv_protobuf;
+        uint32_t recv_protobuf_len;
+        uint32_t recv_protobuf_received;
         // uint8_t recv_buf[1024];
 };
 
@@ -64,5 +72,8 @@ void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client
 	struct handoff_out *out_ctx, int osd_arr_index);
 void handoff_out_send(struct handoff_out *out_ctx);
 void handoff_out_recv(struct handoff_out *out_ctx);
+
+void handoff_in_recv(struct handoff_in *in_ctx);
+void handoff_in_send(struct handoff_in *in_ctx);
 
 #endif
