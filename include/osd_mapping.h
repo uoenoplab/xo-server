@@ -6,11 +6,11 @@
 extern char *osd_addr_strs[MAX_OSDS];
 extern struct sockaddr_in osd_addrs[MAX_OSDS];
 extern int osd_ids[MAX_OSDS];
-extern int osd_id_to_arr_index[]
+extern int osd_id_to_arr_index[];
 extern int num_osds;
 extern int num_peers;
 
-// TODO: add a data structure to optimize this linear search?
+// FUTURE TODO: add a data structure to optimize this linear search?
 static inline int get_arr_index_from_osd_id(int osd_id)
 {
     for (int i = 0; i < num_osds; i++)
@@ -21,6 +21,11 @@ static inline int get_arr_index_from_osd_id(int osd_id)
     fprintf(stderr, "%s: cant find osd_id %d in array\n",
         __func__, osd_id);
     return -1;
+}
+
+static inline struct sockaddr_in get_my_osd_addr()
+{
+    return osd_addrs[num_osds - 1];
 }
 
 static inline char *get_my_osd_addr_str()

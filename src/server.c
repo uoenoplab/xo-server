@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <ini.h>
 #include <netinet/tcp.h>
+#include <sys/eventfd.h>
 
 #include "http_client.h"
 #include "tls.h"
@@ -52,7 +53,6 @@ enum THREAD_EPOLL_EVENT {
 // 5.1 wait for async completion, respond http OK
 
 const size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 4;
-const int enable = 1;
 
 volatile sig_atomic_t server_running = 1;
 
@@ -60,6 +60,7 @@ char *osd_addr_strs[MAX_OSDS] = { NULL };
 struct sockaddr_in osd_addrs[MAX_OSDS];
 int osd_ids[MAX_OSDS] = { 0 };
 int num_osds = 0;
+int num_peers = 0;
 
 struct thread_param {
 	int thread_id;
@@ -183,7 +184,7 @@ static ssize_t handle_client_data_ssl(struct http_client *client, SSL_CTX *ssl_c
 		// Not SSL, use HTTP, need to feed bytes to llhttp from preivous recv first
 		if (!client->tls.is_ssl) {
 			if (client->tls.client_hello_check_off > 0) {
-				do_llhttp_execute(client, client->tls.client_hello_check_buf,
+				do_llhttp_execute(client, (char *)client->tls.client_hello_check_buf,
 					client->tls.client_hello_check_off);
 			}
 			return bytes_received;
@@ -244,8 +245,6 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 	client->bucket_io_ctx = bucket_io_ctx;
 	client->data_io_ctx = data_io_ctx;
 	do_llhttp_execute(client, client_data_buffer, bytes_received);
-	// TODO: we issue handoff request here if related flag in client detected
-	// need a queue to store handoff works?
 }
 
 static void *conn_wait(void *arg)
@@ -301,7 +300,7 @@ static void *conn_wait(void *arg)
 	// Add handoff_in eventfd into epoll
 	memset(&event, 0 , sizeof(event));
 	handoff_in_ctxs[num_osds - 1].epoll_data_u32 = HANDOFF_IN_EVENT;
-	handoff_in_ctxs[num_osds - 1].epoll_fd;
+	handoff_in_ctxs[num_osds - 1].epoll_fd = epoll_fd;
 	handoff_in_ctxs[num_osds - 1].fd = param->handoff_in_eventfd;
 	event.events = EPOLLIN;
 	event.data.ptr = &handoff_in_ctxs[num_osds - 1];
@@ -317,10 +316,10 @@ static void *conn_wait(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0)
+	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR,  &(int){1}, sizeof(int)) < 0)
 		perror("setsockopt(SO_REUSEADDR) failed");
 
-	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(int)) < 0)
+	if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int)) < 0)
 		perror("setsockopt(SO_REUSEPORT) failed");
 
 	// Initialize server address structure
@@ -353,6 +352,10 @@ static void *conn_wait(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
+	printf("Thread %d HANDOFF_IN Ready to get accepted connections from main thread on eventfd %d\n",
+		param->thread_id, param->handoff_in_eventfd);
+	printf("Thread %d S3_HTTP Ready to accept connections on fd %d port %d\n",
+		param->thread_id, S3_HTTP_PORT, server_fd);
 	while (server_running) {
 		// Wait for events using epoll
 		memset(events, 0, sizeof(struct epoll_event) * MAX_EVENTS);
@@ -398,7 +401,11 @@ static void *conn_wait(void *arg)
 					if (events[i].events & EPOLLIN) {
 						uint64_t val;
 						int in_fd, osd_arr_index;
-						read(param->handoff_in_eventfd, &val, sizeof(val));
+						int ret = read(param->handoff_in_eventfd, &val, sizeof(val));
+						if (ret != sizeof(val)) {
+							perror("read eventfd");
+							exit(EXIT_FAILURE);
+						}
 						split_uint64_to_ints(val, &in_fd, &osd_arr_index);
 						if (handoff_in_ctxs[osd_arr_index].fd == 0) {
 							printf("Thread %d HANDOFF_IN receives a new conn %d (osd id %d)\n",
@@ -413,8 +420,12 @@ static void *conn_wait(void *arg)
 						handoff_in_ctxs[osd_arr_index].osd_arr_index = osd_arr_index;
 						handoff_in_ctxs[osd_arr_index].epoll_data_u32 = HANDOFF_IN_EVENT;
 						memset(&event, 0 , sizeof(event));
-						// TODO maybe a reconnect socket, and we want to send HANDOFF_DONE immediately
 						event.events = EPOLLIN;
+						// maybe a reconnect socket when still have buf not
+						// sent out, need to set epoll as OUT mode
+						if (handoff_in_ctxs[osd_arr_index].send_protobuf != NULL) {
+							event.events = EPOLLOUT;
+						}
 						event.data.ptr = &handoff_in_ctxs[osd_arr_index];
 						if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event) == -1) {
 							perror("epoll_ctl");
@@ -450,10 +461,10 @@ static void *conn_wait(void *arg)
 					// means current connection is broken
 					handoff_out_reconnect(out_ctx);
 				} else if (events[i].events & EPOLLOUT) {
-					handoff_out_send(epoll_fd, out_ctx);
+					handoff_out_send(out_ctx);
 				} else if (events[i].events & EPOLLIN) {
 					// handle handoff response, if all received, then swtich back to epollout
-					handoff_out_recv(epoll_fd, out_ctx);
+					handoff_out_recv(out_ctx);
 				} else {
 					fprintf(stderr, "Thread %d HANDOFF_OUT unhandled event (fd %d events %d)\n",
 						param->thread_id, events[i].data.fd, events[i].events);
@@ -464,6 +475,9 @@ static void *conn_wait(void *arg)
 			}
 		}
 	}
+
+	// TODO: close all handoff_out sockets
+	// TODO: close all pending buffer
 
 	close(epoll_fd);
 	close(server_fd);
@@ -551,12 +565,12 @@ int handoff_server_listen()
 		return -1;
 	}
 
-	if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable))) {
+	if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int))) {
 		perror("setsockopt");
 		return -1;
 	}
 
-	if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(enable))) {
+	if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int))) {
 		perror("setsockopt");
 		return -1;
 	}
@@ -602,6 +616,8 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 
 	struct epoll_event events[MAX_EVENTS];
 	int n, nfds;
+
+	printf("Ready to receive handoff_in connections on port %d\n", HANDOFF_CTRL_PORT);
 	while (server_running) {
 		nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 		if (nfds == -1 && errno != EINTR) {
@@ -615,7 +631,7 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 					fprintf(stderr, "listen_fd returned invalid event %d\n", events[n].events);
 					exit(EXIT_FAILURE);
 				}
-				int i, j, fd = events[n].data.fd;
+				int i = -1, j = -1, fd = events[n].data.fd;
 				for (i = 0; i < nproc; i++)
 				{
 					for (j = 0; j < num_peers; j++)
@@ -722,7 +738,6 @@ int main(int argc, char *argv[])
 {
 	rados_t cluster;
 	struct sigaction sa;
-	const int enable = 1;
 	int err;
 
 	if (argc != 3) {
@@ -800,8 +815,7 @@ int main(int argc, char *argv[])
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGUSR1, &sa, NULL);
 
-	// TODO: this word is abit confusing, to be fix
-	printf("Launching %d threads\n", S3_HTTP_PORT, nproc);
+	printf("Launching %ld threads\n", nproc);
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
 		//param[i].server_fd = server_fd;
@@ -837,12 +851,14 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "fail to join thread %d\n", i);
 			exit(1);
 		}
+
+		close(param[i].handoff_in_eventfd);
 	}
 
 	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);
 
-	for (size_t i = 0; i < num_osds; i++) {
+	for (int i = 0; i < num_osds; i++) {
 		if (osd_addr_strs[i] != NULL) free(osd_addr_strs[i]);
 	}
 

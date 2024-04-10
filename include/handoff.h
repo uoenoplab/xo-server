@@ -3,11 +3,6 @@
 
 #include "http_client.h"
 
-enum {
-        HANDOFF_REQUEST,
-        HANDOFF_DONE
-}
-
 #ifndef TCPOPT_MSS
 #define TCPOPT_MSS 2
 #endif
@@ -24,11 +19,11 @@ enum {
 #define TCPOPT_TIMESTAMP 8
 #endif
 
-#define MAX_NUM_PEERS 1024
+enum {
+        HANDOFF_REQUEST,
+        HANDOFF_DONE
+};
 
-extern int num_peers;
-
-// TODO
 struct handoff_in {
 	uint32_t epoll_data_u32;
 	int epoll_fd;
@@ -49,7 +44,6 @@ struct handoff_out_queue {
     struct handoff_out_req* rear;
 };
 
-// TODO
 struct handoff_out {
 	uint32_t epoll_data_u32;
 	int epoll_fd;

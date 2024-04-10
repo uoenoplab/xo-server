@@ -10,10 +10,10 @@
 
 #include "tls.h"
 
-static void hexdump(const char *title, void *buf, size_t len)
+static void __attribute_maybe_unused__ hexdump(const char *title, void *buf, size_t len)
 {
   printf("%s (%lu bytes) :\n", title, len);
-  for (int i = 0; i < len; i++) {
+  for (size_t i = 0; i < len; i++) {
     printf("%02hhX ", ((uint8_t *)buf)[i]);
     if (i % 16 == 15) printf("\n");
   }
@@ -42,10 +42,10 @@ int hkdf_tls13_sha384_expand(EVP_KDF_CTX *kctx,
     OSSL_PARAM params[8], *p = params;
 
     *p++ = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, SN_sha384, strlen(SN_sha384));
-    *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, (void*)in, in_len);
+    *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, (void *)in, in_len);
     *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, "", 0);
     *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_PREFIX, "tls13 ", strlen("tls13 "));
-    *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_LABEL, label, strlen(label));
+    *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_LABEL, (void *)label, strlen(label));
     *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_DATA, "", 0);
     *p++ = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE, "EXPAND_ONLY", strlen("EXPAND_ONLY"));
     *p = OSSL_PARAM_construct_end();
@@ -127,7 +127,7 @@ static inline void print_ssl_error(const char *msg)
 	BIO_free(bio);
 }
 
-static inline int count_tls_records(const uint8_t *buffer, size_t buf_size) {
+static inline int count_tls_records(const char *buffer, size_t buf_size) {
     // Check if the buffer starts with a TLS header
     if (buf_size < 5 || buffer[0] != 0x17 || buffer[1] != 0x03 || buffer[2] != 0x03) {
         printf("Error: Buffer does not start with a TLS header.\n");
@@ -485,7 +485,7 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 		}
 
 		// scan number of tls record headers from pending bytes
-		uint64_t recv_rec_seqnum = count_tls_records(client_data_buffer + bytes_received - bytes_pending, bytes_pending);
+		int recv_rec_seqnum = count_tls_records(client_data_buffer + bytes_received - bytes_pending, bytes_pending);
 		if (recv_rec_seqnum == -1) {
 			perror("Unable to handle the case tls record arrived "
 				"partically before set ktls");
@@ -523,7 +523,7 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 		}
 
 		// now we are safe to set ktls
-		if (tls_make_ktls(client, recv_rec_seqnum) == -1) {
+		if (tls_make_ktls(client, (uint64_t) recv_rec_seqnum) == -1) {
 			fprintf(stderr, "tls_make_ktls failed\n");
 			return -1;
 		}
