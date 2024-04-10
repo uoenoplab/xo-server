@@ -63,7 +63,7 @@ int num_osds = 0;
 struct thread_param {
 	int thread_id;
 	// int server_fd;
-	rados_t *cluster;
+	rados_t cluster;
 	int handoff_in_eventfd;
 };
 
@@ -204,8 +204,8 @@ static ssize_t handle_client_data_ssl(struct http_client *client, SSL_CTX *ssl_c
 }
 
 void handle_client_data(int epoll_fd, struct http_client *client,
-	char *client_data_buffer, int thread_id, rados_ioctx_t *bucket_io_ctx,
-	rados_ioctx_t *data_io_ctx, SSL_CTX *ssl_ctx)
+	char *client_data_buffer, int thread_id, rados_ioctx_t bucket_io_ctx,
+	rados_ioctx_t data_io_ctx, SSL_CTX *ssl_ctx)
 {
 	ssize_t bytes_received;
 
@@ -262,14 +262,13 @@ static void *conn_wait(void *arg)
 	//int server_fd = param->server_fd;
 	int server_fd = -1;
 	int thread_id = param->thread_id;
-	rados_t *cluster = param->cluster;
+	rados_t cluster = param->cluster;
 
-	char *client_data_buffer = malloc(BUF_SIZE);
+	char client_data_buffer[BUF_SIZE];
 
 	int epoll_fd, event_count;
 	struct epoll_event event;
-	struct epoll_event *events = (struct epoll_event*)malloc(sizeof(struct epoll_event) * MAX_EVENTS);
-	assert(events != NULL);
+	struct epoll_event events[MAX_EVENTS];
 
 	SSL_CTX *ssl_ctx = tls_init_ctx("./assets/server.crt", "./assets/server.key");
 	if (ssl_ctx == NULL) {
@@ -277,14 +276,14 @@ static void *conn_wait(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-	int err = rados_ioctx_create(*cluster, BUCKET_POOL, &bucket_io_ctx);
+	int err = rados_ioctx_create(cluster, BUCKET_POOL, &bucket_io_ctx);
 	if (err < 0) {
 		fprintf(stderr, "cannot open rados pool %s: %s\n", BUCKET_POOL, strerror(-err));
 		rados_shutdown(cluster);
 		exit(1);
 	}
 
-	err = rados_ioctx_create(*cluster, DATA_POOL, &data_io_ctx);
+	err = rados_ioctx_create(cluster, DATA_POOL, &data_io_ctx);
 	if (err < 0) {
 		fprintf(stderr, "cannot open rados pool %s: %s\n", DATA_POOL, strerror(-err));
 		rados_shutdown(cluster);
@@ -297,16 +296,16 @@ static void *conn_wait(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-	// Add handoff_in eventfd into epoll
-	memset(&event, 0 , sizeof(event));
-	event.data.fd = param->handoff_in_eventfd;
-	printf("Thread %d HANDOFF_IN regiester eventfd %d\n", param->thread_id, param->handoff_in_eventfd);
-	event.events = EPOLLIN;
-	event.data.u32 = HANDOFF_IN_EVENT;
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_eventfd, &event) == -1) {
-		perror("epoll_ctl: efd");
-		exit(EXIT_FAILURE);
-	}
+//	// Add handoff_in eventfd into epoll
+//	memset(&event, 0 , sizeof(event));
+//	event.data.fd = param->handoff_in_eventfd;
+//	printf("Thread %d HANDOFF_IN regiester eventfd %d\n", param->thread_id, param->handoff_in_eventfd);
+//	event.events = EPOLLIN;
+//	event.data.u32 = HANDOFF_IN_EVENT;
+//	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_eventfd, &event) == -1) {
+//		perror("epoll_ctl: efd");
+//		exit(EXIT_FAILURE);
+//	}
 
 	// Create a TCP socket
 	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
@@ -377,7 +376,7 @@ static void *conn_wait(void *arg)
 					send_client_data(c);
 				}
 				else if (events[i].events & EPOLLIN) {
-					handle_client_data(epoll_fd, c, client_data_buffer, thread_id, &bucket_io_ctx, &data_io_ctx, ssl_ctx);
+					handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
 				} else {
 					fprintf(stderr, "Thread %d S3_HTTP unhandled event (fd %d events %d)\n",
 						param->thread_id, events[i].data.fd, events[i].events);
@@ -483,9 +482,7 @@ static void *conn_wait(void *arg)
 	close(server_fd);
 
 	tls_uninit_ctx(ssl_ctx);
-	free(client_data_buffer);
 	free_http_client(server_client);
-	free(events);
 
 	rados_ioctx_destroy(bucket_io_ctx);
 	rados_ioctx_destroy(data_io_ctx);
@@ -809,7 +806,7 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
 		//param[i].server_fd = server_fd;
-		param[i].cluster = &cluster;
+		param[i].cluster = cluster;
 		param[i].handoff_in_eventfd = eventfd(0, 0);
 		if (param[i].handoff_in_eventfd == -1) {
 			perror("eventfd");

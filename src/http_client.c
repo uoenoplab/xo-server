@@ -66,7 +66,7 @@ static int on_header_field_cb(llhttp_t *parser, const char *at, size_t length)
 		client->header_value_parsed = 0;
 	}
 
-	assert(client->header_field_parsed + length < MAX_LENGTH_SIZE);
+	assert(client->header_field_parsed + length < MAX_FIELDS_SIZE);
 	memcpy(&(client->header_fields[client->num_fields][client->header_field_parsed]), at, length);
 	client->header_field_parsed += length;
 	return 0;
@@ -305,12 +305,12 @@ static int on_headers_complete_cb(llhttp_t* parser)
 		if (strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
 			/* check if we want to migrate */
 			int acting_primary_osd_id = -1;
-			ret = rados_get_object_osd_position(*(client->data_io_ctx), client->object_name, &acting_primary_osd_id);
+			ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &acting_primary_osd_id);
 			assert(ret == 0);
-			if (get_my_osd_id() == acting_primary_osd_id) {
-				printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
-				handle_handoff_out_send(client, acting_primary_osd_id);
-			}
+			printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
+			//if (get_my_osd_id() == acting_primary_osd_id) {
+			//	handle_handoff_out_send(client, acting_primary_osd_id);
+			//}
 		}
 
 		init_object_get_request(client);
