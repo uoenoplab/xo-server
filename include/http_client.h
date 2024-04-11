@@ -47,7 +47,7 @@ struct http_client {
 	int fd;
 	int epoll_fd;
 
-	uint8_t client_mac;
+	uint8_t client_mac[6];
 
 	int prval;
 	rados_xattrs_iter_t iter;

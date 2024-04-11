@@ -15,7 +15,7 @@ message socket_serialize {
         uint64 self_addr = 9;
         uint32 self_port = 10;
         uint64 peer_addr = 11;
-	uint32 peer_mac = 12;
+	uint64 peer_mac = 12;
         uint32 peer_port = 13;
         uint32 mss = 14;
         uint32 send_wscale = 15;

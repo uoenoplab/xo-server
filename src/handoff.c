@@ -292,7 +292,7 @@ static void handoff_out_serialize(struct http_client *client)
 
 	migration_info.object_size = client->object_size;
 
-	migration_info.peer_mac = client->client_mac;
+	memcpy(&(migration_info.peer_mac), client->client_mac, sizeof(uint8_t) * 6);
 
 	size_t proto_len = socket_serialize__get_packed_size(&migration_info);
 	uint32_t net_proto_len = htonl(proto_len);
@@ -361,7 +361,7 @@ void handoff_out_connect(struct handoff_out *out_ctx) {
 
 // TODO: add a limit for reconnect
 void handoff_out_reconnect(struct handoff_out *out_ctx) {
-	printf("Thread %d HANDOFF_OUT try RE-connect to osd id %d (ip %s, port %s)\n",
+	printf("Thread %d HANDOFF_OUT try RE-connect to osd id %d (ip %s, port %d)\n",
 		out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
 		osd_addr_strs[out_ctx->osd_arr_index],
 		ntohl(osd_addrs[out_ctx->osd_arr_index].sin_port));
@@ -678,14 +678,22 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	client->object_size = migration_info->object_size;
 	client->method = migration_info->method;
 
-	client->client_mac = migration_info->peer_mac;
+	memcpy(client->client_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
 
 	// apply src IP modification
+//	
+//	// Extract the MAC address from the reply
+	
+	printf("migration peer mac is ");
+	print_mac_address(client->client_mac);
+
+
 	printf("deserialized: %s\n", client->uri_str);
-	apply_redirection_str(get_my_osd_addr_str(), "fake server MAC", migration_info->peer_addr, client->client_mac,
-			migration_info->self_port, migration_info->peer_port,
-			migration_info->self_addr, "fake server MAC", migration_info->peer_addr, client->client_mac,
-			migration_info->self_port, migration_info->peer_port, false);
+	ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
+				migration_info->self_port, migration_info->peer_port,
+				migration_info->self_addr, my_mac, migration_info->peer_addr, client->client_mac,
+				migration_info->self_port, migration_info->peer_port, false, false);
+	assert(ret == 0);
 
 	/* quiting repair mode */
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
@@ -696,7 +704,6 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	event.events = EPOLLIN;
 	ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
 	assert(ret == 0);
-
 }
 
 void handoff_in_disconnect(struct handoff_in *in_ctx)

@@ -6,7 +6,11 @@
 
 #include "util.h"
 
-//void __attribute_maybe_unused__ hexdump(const char *title, void *buf, size_t len)
+void print_mac_address(unsigned char *mac) {
+	printf("%02x:%02x:%02x:%02x:%02x:%02x\n", 
+		mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
 void hexdump(const char *title, void *buf, size_t len)
 {
 	printf("%s (%lu bytes) :\n", title, len);

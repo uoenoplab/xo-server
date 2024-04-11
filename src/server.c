@@ -69,6 +69,8 @@ int osd_ids[MAX_OSDS] = { 0 };
 int num_osds = 0;
 int num_peers = 0;
 
+uint8_t my_mac[6];
+
 struct thread_param {
 	int thread_id;
 	// int server_fd;
@@ -92,11 +94,10 @@ void handleCtrlC(int signum)
 }
 
 // Function to get MAC address from IP
-static int get_mac_address(const char *ip_address, char *mac_str) {
+static int get_mac_address(const char *ip_address, uint8_t *mac) {
 	struct arpreq arp_req;
 	struct sockaddr_in *sin;
 	int sock_fd;
-	unsigned char *mac;
 
 	memset(&arp_req, 0, sizeof(struct arpreq));
 	sin = (struct sockaddr_in *)&arp_req.arp_pa;
@@ -125,12 +126,12 @@ static int get_mac_address(const char *ip_address, char *mac_str) {
 	}
 
 	// Extract the MAC address from the reply
-	mac = (unsigned char *)&arp_req.arp_ha.sa_data;
-	sprintf(mac_str, "%02x:%02x:%02x:%02x:%02x:%02x",
-			mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-
+	memcpy(mac, arp_req.arp_ha.sa_data, sizeof(uint8_t) * 6);
+	printf("MAC addr of remote ip %s is ", ip_address);
+	print_mac_address(mac);
+	
 	close(sock_fd);
-	return arp_req.arp_ha.sa_data;
+	return 0;
 }
 
 
@@ -172,8 +173,8 @@ void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
 	event.events = EPOLLIN;
 	struct http_client *client = create_http_client(epoll_fd, new_socket);
 	client->epoll_data_u32 = S3_HTTP_EVENT;
-	char client_mac[32];
-	client->client_mac = get_mac_address(inet_ntoa(client_addr.sin_addr), client_mac);
+	int ret = get_mac_address(inet_ntoa(client_addr.sin_addr), client->client_mac);
+	assert(err == 0);
 	event.data.ptr = client;
 
 	set_socket_non_blocking(new_socket);
@@ -547,11 +548,26 @@ static void rearrange_osd_addrs(char *ifname)
 	struct ifreq ifr;
 	int fd = socket(AF_INET, SOCK_DGRAM, 0);
 	ifr.ifr_addr.sa_family = AF_INET;
-	strncpy(ifr.ifr_name , ifname , IFNAMSIZ - 1);
-	ioctl(fd, SIOCGIFADDR, &ifr);
-	close(fd);
+	strncpy(ifr.ifr_name , ifname , IFNAMSIZ);
 
-	char *my_ip_address = inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr )->sin_addr);
+	if (ioctl(fd, SIOCGIFADDR, &ifr) == -1 ) {
+		perror("IOCTL SIOCGIFADDR failed");
+		close(fd);
+		exit(EXIT_FAILURE);
+	}
+
+	char *my_ip_address = inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr);
+
+	// Perform the IOCTL operation to fetch the hardware address
+	if (ioctl(fd, SIOCGIFHWADDR, &ifr) == -1) {
+		perror("IOCTL SIOCGIFHWADDR failed");
+		close(fd);
+		return -1;
+	}
+
+	memcpy(my_mac, ifr.ifr_hwaddr.sa_data, 6);
+
+	close(fd);
 
 	// put osd info of this node to end of array
 	for (int i = 0; i < num_osds; i++) {
@@ -566,16 +582,19 @@ static void rearrange_osd_addrs(char *ifname)
 		}
 	}
 
+	char mac_str[18];
+	sprintf(mac_str, "%02x:%02x:%02x:%02x:%02x:%02x", 
+		my_mac[0], my_mac[1], my_mac[2], my_mac[3], my_mac[4], my_mac[5]);
 	// current xo-server node is not an OSD
 	if (strcmp(osd_addr_strs[num_osds - 1], my_ip_address) != 0) {
 		osd_addr_strs[num_osds] = strdup(my_ip_address);
 		osd_ids[num_osds] = -1;
 		num_osds++;
-		printf("xo-server is not running on an OSD (interface %s, ip %s)\n",
-			ifname, osd_addr_strs[num_osds - 1]);
+		printf("xo-server is not running on an OSD (interface %s, ip %s, mac %s)\n",
+			ifname, osd_addr_strs[num_osds - 1], mac_str);
 	} else {
-		printf("xo-server is running on an OSD (interface %s, ip %s, osd_id %d)\n",
-			ifname, osd_addr_strs[num_osds - 1], osd_ids[num_osds - 1]);
+		printf("xo-server is running on an OSD (interface %s, ip %s, mac %s, osd_id %d)\n",
+			ifname, osd_addr_strs[num_osds - 1], mac_str, osd_ids[num_osds - 1]);
 	}
 
 	for (int i = 0; i < num_osds; i++)

@@ -10,6 +10,8 @@ extern int osd_id_to_arr_index[];
 extern int num_osds;
 extern int num_peers;
 
+extern uint8_t my_mac[6];
+
 // FUTURE TODO: add a data structure to optimize this linear search?
 static inline int get_arr_index_from_osd_id(int osd_id)
 {
