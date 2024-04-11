@@ -28,6 +28,73 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 	}
 }
 
+void aio_read_complete(rados_completion_t comp, void *arg)
+{
+	struct http_client *client = (struct http_client*)arg;
+	/* wait for head read to complete */
+	//rados_aio_wait_for_complete(client->comp);
+	//rados_aio_release(client->comp);
+	//rados_release_read_op(client->read_op);
+
+	char datetime_str[256];
+	get_datetime_str(datetime_str, 256);
+	if (client->prval != 0) {
+		printf("object %s not found\n", client->object_name);
+		client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
+		assert(client->response_size <= MAX_RESPONSE_SIZE);
+		snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
+		client->response_size--;
+
+		//client->data_payload = NULL;
+		client->data_payload_size = 0;
+	}
+	else {
+		const char *attr_name = NULL;
+		const char *attr_val = NULL;
+		size_t attr_val_len = -1;
+
+		size_t full_object_size = 0;
+
+		char *etag = NULL;
+		char *last_modified_datetime_str = NULL;
+		while (rados_getxattrs_next(client->iter, &attr_name, &attr_val, &attr_val_len) == 0 && (attr_name != NULL & attr_val != NULL)) {
+			if (strcmp(attr_name, "size") == 0) {
+				full_object_size = atol(attr_val);
+			}
+			else if (strcmp(attr_name, "etag") == 0) {
+				etag = strdup(attr_val);
+			}
+			else if (strcmp(attr_name, "last_modified") == 0) {
+				last_modified_datetime_str = strdup(attr_val);
+			}
+		}
+		rados_getxattrs_end(client->iter);
+
+		client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: \"%s\"\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, full_object_size, etag, last_modified_datetime_str, datetime_str) + 1;
+		assert(client->response_size <= MAX_RESPONSE_SIZE);
+		snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: \"%s\"\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, full_object_size, etag, last_modified_datetime_str, datetime_str);
+		client->response_size--;
+
+		if (etag) free(etag);
+		if (last_modified_datetime_str) free(last_modified_datetime_str);
+
+		if (client->object_size < full_object_size) {
+			size_t tail_size = full_object_size - client->object_size;
+			size_t bytes_read = client->object_size;
+			client->object_size = full_object_size;
+
+			client->data_payload = realloc(client->data_payload, client->object_size);
+			assert(client->data_payload != NULL);
+			client->data_payload_size = client->object_size;
+
+			int ret = rados_read(client->data_io_ctx, client->object_name, client->data_payload + bytes_read, tail_size, bytes_read);
+			assert(ret == tail_size);
+		}
+		client->data_payload_size = client->object_size;
+	}
+	send_response(client);
+}
+
 void init_object_get_request(struct http_client *client)
 {
 	// getting object
@@ -40,7 +107,8 @@ void init_object_get_request(struct http_client *client)
 		client->data_payload = realloc(client->data_payload, FIRST_READ_SIZE);
 		assert(client->data_payload != NULL);
 
-		rados_aio_create_completion((void*)client, NULL, NULL, &(client->comp));
+		//rados_aio_create_completion((void*)client, NULL, NULL, &(client->comp));
+		rados_aio_create_completion((void*)client, aio_read_complete, NULL, &(client->comp));
 		client->read_op = rados_create_read_op();
 		rados_read_op_assert_exists(client->read_op);
 		rados_read_op_getxattrs(client->read_op, &(client->iter), &(client->prval));
@@ -550,67 +618,10 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 	}
 	else if (strlen(client->bucket_name) != 0 && strlen(client->object_name) != 0) {
 		// in case the connection is migrated, nothing to return here
-		if (client->to_migrate != -1) return;
-		/* wait for head read to complete */
+		//if (client->to_migrate != -1) return;
 		rados_aio_wait_for_complete(client->comp);
 		rados_aio_release(client->comp);
 		rados_release_read_op(client->read_op);
-
-		if (client->prval != 0) {
-			printf("object %s not found\n", client->object_name);
-			client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
-			assert(client->response_size <= MAX_RESPONSE_SIZE);
-			snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
-			client->response_size--;
-	
-			//client->data_payload = NULL;
-			client->data_payload_size = 0;
-		}
-		else {
-			const char *attr_name = NULL;
-			const char *attr_val = NULL;
-			size_t attr_val_len = -1;
-	
-			size_t full_object_size = 0;
-	
-			char *etag = NULL;
-			char *last_modified_datetime_str = NULL;
-			while (rados_getxattrs_next(client->iter, &attr_name, &attr_val, &attr_val_len) == 0 && (attr_name != NULL & attr_val != NULL)) {
-				if (strcmp(attr_name, "size") == 0) {
-					full_object_size = atol(attr_val);
-				}
-				else if (strcmp(attr_name, "etag") == 0) {
-					etag = strdup(attr_val);
-				}
-				else if (strcmp(attr_name, "last_modified") == 0) {
-					last_modified_datetime_str = strdup(attr_val);
-				}
-			}
-			rados_getxattrs_end(client->iter);
-	
-			client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: \"%s\"\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, full_object_size, etag, last_modified_datetime_str, datetime_str) + 1;
-			assert(client->response_size <= MAX_RESPONSE_SIZE);
-			snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: \"%s\"\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, full_object_size, etag, last_modified_datetime_str, datetime_str);
-			client->response_size--;
-	
-			if (etag) free(etag);
-			if (last_modified_datetime_str) free(last_modified_datetime_str);
-	
-			if (client->object_size < full_object_size) {
-				size_t tail_size = full_object_size - client->object_size;
-				size_t bytes_read = client->object_size;
-				client->object_size = full_object_size;
-	
-				client->data_payload = realloc(client->data_payload, client->object_size);
-				assert(client->data_payload != NULL);
-				client->data_payload_size = client->object_size;
-	
-				ret = rados_read(client->data_io_ctx, client->object_name, client->data_payload + bytes_read, tail_size, bytes_read);
-				assert(ret == tail_size);
-			}
-			client->data_payload_size = client->object_size;
-		}
-		send_response(client);
 	}
 }
 
