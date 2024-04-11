@@ -227,8 +227,6 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 		return;
 	}
 
-	// printf("%s: bytes_received %d\n", __func__, bytes_received);
-
 	if (client->tls.is_ssl){
 		bytes_received = handle_client_data_ssl(client, ssl_ctx, client_data_buffer, bytes_received);
 		if (bytes_received == -1) {
@@ -237,8 +235,6 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 		}
 		if (bytes_received == 0) return;
 	}
-
-	//printf("%.*s", (int)bytes_received, client_data_buffer);
 
 	client->bucket_io_ctx = bucket_io_ctx;
 	client->data_io_ctx = data_io_ctx;
@@ -260,7 +256,6 @@ static void *conn_wait(void *arg)
 	rados_ioctx_t data_io_ctx;
 
 	struct thread_param *param = (struct thread_param*)arg;
-	//int server_fd = param->server_fd;
 	int server_fd = -1;
 	int thread_id = param->thread_id;
 	rados_t cluster = param->cluster;
@@ -814,11 +809,11 @@ int main(int argc, char *argv[])
 			exit(EXIT_FAILURE);
 		}
 
-		CPU_ZERO(&cpus);
-		CPU_SET((i + 1) % nproc, &cpus);
+		//CPU_ZERO(&cpus);
+		//CPU_SET((i + nproc) % nproc, &cpus);
 
 		pthread_attr_setsigmask_np(&attr, &sigmask);
-		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
+		//pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
 
 		if (pthread_create(&threads[i], &attr, &conn_wait, &param[i]) != 0) {
 			fprintf(stderr, "fail to create thread %d\n", i);

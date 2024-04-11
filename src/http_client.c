@@ -445,8 +445,6 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	client->data_io_ctx = -1;
 
 	client->prval = 0;
-	client->write_op = rados_create_write_op();
-	client->read_op = rados_create_read_op();
 
 	client->tls.is_ssl = true;
 	client->tls.is_handshake_done = false;
@@ -472,8 +470,6 @@ void free_http_client(struct http_client *client)
 	free(client->data_payload);
 	free(client->put_buf);
 
-	rados_release_read_op(client->read_op);
-	rados_release_write_op(client->write_op);
 	//rados_aio_release(client->comp);
 
 	free(client);

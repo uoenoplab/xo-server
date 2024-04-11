@@ -49,8 +49,7 @@ struct http_client {
 
 	int prval;
 	rados_xattrs_iter_t iter;
-
-	rados_write_op_t write_op;
+	rados_completion_t comp;
 	rados_read_op_t read_op;
 
 	ssize_t data_payload_sent;
@@ -142,7 +141,5 @@ void free_http_client(struct http_client *client);
 
 void send_client_data(struct http_client *client);
 void send_response(struct http_client *client);
-void aio_ack_callback(rados_completion_t comp, void *arg);
-void aio_commit_callback(rados_completion_t comp, void *arg);
 
 #endif
