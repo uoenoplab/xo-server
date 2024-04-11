@@ -7,7 +7,8 @@
 #include "object_store.h"
 #include "osd_mapping.h"
 
-#define FIRST_READ_SIZE sizeof(char) * 1024 * 4096
+//#define FIRST_READ_SIZE sizeof(char) * 1024 * 4096
+#define FIRST_READ_SIZE 512 * 1024
 
 void delete_objects(struct http_client *client, const char *buf, size_t length)
 {
@@ -676,7 +677,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 				client->data_payload_size = client->object_size;
 	
 				ret = rados_read(client->data_io_ctx, client->object_name, client->data_payload + bytes_read, tail_size, bytes_read);
-				assert(ret == 0);
+				assert(ret == tail_size);
 			}
 			client->data_payload_size = client->object_size;
 		}
