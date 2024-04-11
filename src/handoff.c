@@ -217,7 +217,7 @@ static void handoff_out_serialize(struct http_client *client)
 		sndbuf = calloc(1, sendq_len + 1);
 		assert(sndbuf != NULL);
 		ret = recv(fd, sndbuf, sendq_len + 1, peek);
-		assert(ret == send_len);
+		assert(ret == sendq_len);
 	}
 
 	const int qid_rcv = TCP_RECV_QUEUE;

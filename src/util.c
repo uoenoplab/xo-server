@@ -36,7 +36,7 @@ void convertToISODateTime(const char* inputDateTime, char* outputISODateTime) {
 	time_t epochTime = mktime(&timeinfo);
 
 	// Format the time in ISO format
-	strftime(outputISODateTime, 21, "%Y-%m-%dT%H:%M:%SZ", gmtime(&epochTime));
+	strftime(outputISODateTime, 128, "%Y-%m-%dT%H:%M:%SZ", gmtime(&epochTime));
 }
 
 void unescapeHtml(char* str) {

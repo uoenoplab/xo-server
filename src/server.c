@@ -65,7 +65,7 @@ int num_peers = 0;
 struct thread_param {
 	int thread_id;
 	// int server_fd;
-	rados_t *cluster;
+	rados_t cluster;
 	int handoff_in_eventfd;
 };
 
@@ -206,8 +206,8 @@ static ssize_t handle_client_data_ssl(struct http_client *client, SSL_CTX *ssl_c
 }
 
 void handle_client_data(int epoll_fd, struct http_client *client,
-	char *client_data_buffer, int thread_id, rados_ioctx_t *bucket_io_ctx,
-	rados_ioctx_t *data_io_ctx, SSL_CTX *ssl_ctx)
+	char *client_data_buffer, int thread_id, rados_ioctx_t bucket_io_ctx,
+	rados_ioctx_t data_io_ctx, SSL_CTX *ssl_ctx)
 {
 	ssize_t bytes_received;
 
@@ -229,8 +229,6 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 		return;
 	}
 
-	// printf("%s: bytes_received %d\n", __func__, bytes_received);
-
 	if (client->tls.is_ssl){
 		bytes_received = handle_client_data_ssl(client, ssl_ctx, client_data_buffer, bytes_received);
 		if (bytes_received == -1) {
@@ -239,8 +237,6 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 		}
 		if (bytes_received == 0) return;
 	}
-
-	//printf("%.*s", (int)bytes_received, client_data_buffer);
 
 	client->bucket_io_ctx = bucket_io_ctx;
 	client->data_io_ctx = data_io_ctx;
@@ -259,17 +255,15 @@ static void *conn_wait(void *arg)
 	rados_ioctx_t data_io_ctx;
 
 	struct thread_param *param = (struct thread_param*)arg;
-	//int server_fd = param->server_fd;
 	int server_fd = -1;
 	int thread_id = param->thread_id;
-	rados_t *cluster = param->cluster;
+	rados_t cluster = param->cluster;
 
-	char *client_data_buffer = malloc(BUF_SIZE);
+	char client_data_buffer[BUF_SIZE];
 
 	int epoll_fd, event_count;
 	struct epoll_event event;
-	struct epoll_event *events = (struct epoll_event*)malloc(sizeof(struct epoll_event) * MAX_EVENTS);
-	assert(events != NULL);
+	struct epoll_event events[MAX_EVENTS];
 
 	SSL_CTX *ssl_ctx = tls_init_ctx("./assets/server.crt", "./assets/server.key");
 	if (ssl_ctx == NULL) {
@@ -277,14 +271,14 @@ static void *conn_wait(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-	int err = rados_ioctx_create(*cluster, BUCKET_POOL, &bucket_io_ctx);
+	int err = rados_ioctx_create(cluster, BUCKET_POOL, &bucket_io_ctx);
 	if (err < 0) {
 		fprintf(stderr, "cannot open rados pool %s: %s\n", BUCKET_POOL, strerror(-err));
 		rados_shutdown(cluster);
 		exit(1);
 	}
 
-	err = rados_ioctx_create(*cluster, DATA_POOL, &data_io_ctx);
+	err = rados_ioctx_create(cluster, DATA_POOL, &data_io_ctx);
 	if (err < 0) {
 		fprintf(stderr, "cannot open rados pool %s: %s\n", DATA_POOL, strerror(-err));
 		rados_shutdown(cluster);
@@ -383,7 +377,7 @@ static void *conn_wait(void *arg)
 					send_client_data(c);
 				}
 				else if (events[i].events & EPOLLIN) {
-					handle_client_data(epoll_fd, c, client_data_buffer, thread_id, &bucket_io_ctx, &data_io_ctx, ssl_ctx);
+					handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
 					if (c->to_migrate != -1) {
 						//printf("To migrate to %d\n", c->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
@@ -483,9 +477,7 @@ static void *conn_wait(void *arg)
 	close(server_fd);
 
 	tls_uninit_ctx(ssl_ctx);
-	free(client_data_buffer);
 	free_http_client(server_client);
-	free(events);
 
 	rados_ioctx_destroy(bucket_io_ctx);
 	rados_ioctx_destroy(data_io_ctx);
@@ -765,7 +757,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	//long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+	long max_cores = sysconf(_SC_NPROCESSORS_ONLN);
 	long nproc = atol(argv[2]);
 	pthread_t threads[nproc];
 	struct thread_param param[nproc];
@@ -833,7 +825,7 @@ int main(int argc, char *argv[])
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
 		//param[i].server_fd = server_fd;
-		param[i].cluster = &cluster;
+		param[i].cluster = cluster;
 		param[i].handoff_in_eventfd = eventfd(0, 0);
 		if (param[i].handoff_in_eventfd == -1) {
 			perror("eventfd");
@@ -841,7 +833,7 @@ int main(int argc, char *argv[])
 		}
 
 		CPU_ZERO(&cpus);
-		CPU_SET((i + 1) % nproc, &cpus);
+		CPU_SET((i + max_cores) % max_cores, &cpus);
 
 		pthread_attr_setsigmask_np(&attr, &sigmask);
 		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);

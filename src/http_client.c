@@ -66,7 +66,7 @@ static int on_header_field_cb(llhttp_t *parser, const char *at, size_t length)
 		client->header_value_parsed = 0;
 	}
 
-	assert(client->header_field_parsed + length < MAX_LENGTH_SIZE);
+	assert(client->header_field_parsed + length < MAX_FIELDS_SIZE);
 	memcpy(&(client->header_fields[client->num_fields][client->header_field_parsed]), at, length);
 	client->header_field_parsed += length;
 	return 0;
@@ -262,13 +262,13 @@ void send_response(struct http_client *client)
 	assert(ret == 0);
 }
 
-void aio_ack_callback(rados_completion_t comp, void *arg) {
-}
-
-void aio_commit_callback(rados_completion_t comp, void *arg) {
-	struct http_client *client = (struct http_client*)arg;
-	send_response(client);
-}
+//void aio_ack_callback(rados_completion_t comp, void *arg) {
+//}
+//
+//void aio_commit_callback(rados_completion_t comp, void *arg) {
+//	struct http_client *client = (struct http_client*)arg;
+//	send_response(client);
+//}
 
 static int on_reset_cb(llhttp_t *parser)
 {
@@ -305,13 +305,12 @@ static int on_headers_complete_cb(llhttp_t* parser)
 		if (strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
 			/* check if we want to migrate */
 			int acting_primary_osd_id = -1;
-			ret = rados_get_object_osd_position(*(client->data_io_ctx), client->object_name, &acting_primary_osd_id);
+			ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &acting_primary_osd_id);
 			assert(ret == 0);
-			if (get_my_osd_id() != acting_primary_osd_id) {
-				printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
-				client->to_migrate = acting_primary_osd_id;
-				return 0;
-			}
+			printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
+			//if (get_my_osd_id() == acting_primary_osd_id) {
+			//	handle_handoff_out_send(client, acting_primary_osd_id);
+			//}
 		}
 
 		init_object_get_request(client);
@@ -448,15 +447,11 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 //	client->header_fields = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 //	client->header_values = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 
-	client->bucket_io_ctx = NULL;
-	client->data_io_ctx = NULL;
+	//rados_aio_create_completion((void*)client, aio_commit_callback, NULL, &client->comp);
+	client->bucket_io_ctx = -1;
+	client->data_io_ctx = -1;
 
 	client->prval = 0;
-	client->write_op = rados_create_write_op();
-	client->read_op = rados_create_read_op();
-
-	rados_aio_create_completion((void*)client, aio_ack_callback, aio_commit_callback, &(client->aio_completion));
-	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_head_read_completion));
 
 	client->tls.is_ssl = true;
 	client->tls.is_handshake_done = false;
@@ -482,11 +477,7 @@ void free_http_client(struct http_client *client)
 	free(client->data_payload);
 	free(client->put_buf);
 
-	rados_aio_release(client->aio_head_read_completion);
-	rados_aio_release(client->aio_completion);
-
-	rados_release_read_op(client->read_op);
-	rados_release_write_op(client->write_op);
+	//rados_aio_release(client->comp);
 
 	free(client);
 }
