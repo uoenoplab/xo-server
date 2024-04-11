@@ -378,9 +378,9 @@ static void *conn_wait(void *arg)
 				}
 				else if (events[i].events & EPOLLIN) {
 					handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
-						printf("To migrate to %d\n", c->to_migrate);
+					printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
+						param->thread_id, c->fd, c->to_migrate);
 					if (c->to_migrate != -1) {
-					//	printf("To migrate to %d\n", c->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
@@ -459,6 +459,7 @@ static void *conn_wait(void *arg)
 					handoff_out_send(out_ctx);
 				} else if (events[i].events & EPOLLIN) {
 					// handle handoff response, if all received, then swtich back to epollout
+					printf("invoke handoff_out_recv\n");
 					handoff_out_recv(out_ctx);
 				} else {
 					fprintf(stderr, "Thread %d HANDOFF_OUT unhandled event (fd %d events %d)\n",
@@ -526,7 +527,7 @@ static void rearrange_osd_addrs(char *ifname)
 	{
 		memset(&osd_addrs[i], 0, sizeof(osd_addrs[i]));
 		osd_addrs[i].sin_family = AF_INET;
-		osd_addrs[i].sin_port = htons(S3_HTTP_PORT);
+		osd_addrs[i].sin_port = htons(HANDOFF_CTRL_PORT);
 		if (inet_pton(AF_INET, osd_addr_strs[i], &osd_addrs[i].sin_addr) <= 0) {
 			printf("Invalid address \"%s\" for osd id %d\n", osd_addr_strs[i], osd_ids[i]);
 			exit(EXIT_FAILURE);

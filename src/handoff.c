@@ -324,6 +324,11 @@ static void set_socket_non_blocking(int socket_fd)
 }
 
 void handoff_out_connect(struct handoff_out *out_ctx) {
+	printf("Thread %d HANDOFF_OUT try connect to osd id %d (ip %s, port %d)\n",
+		out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
+		osd_addr_strs[out_ctx->osd_arr_index],
+		ntohl(osd_addrs[out_ctx->osd_arr_index].sin_port));
+
 	out_ctx->fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (out_ctx->fd == -1) {
 		perror("socket");
@@ -354,6 +359,11 @@ void handoff_out_connect(struct handoff_out *out_ctx) {
 
 // TODO: add a limit for reconnect
 void handoff_out_reconnect(struct handoff_out *out_ctx) {
+	printf("Thread %d HANDOFF_OUT try RE-connect to osd id %d (ip %s, port %s)\n",
+		out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
+		osd_addr_strs[out_ctx->osd_arr_index],
+		ntohl(osd_addrs[out_ctx->osd_arr_index].sin_port));
+
 	if (out_ctx->fd != 0) close(out_ctx->fd);
 	handoff_out_connect(out_ctx);
 	struct epoll_event event = {0};
@@ -375,12 +385,15 @@ void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client
 
 	// serialize state, we don't delete client until handoff_out is complete
 	handoff_out_serialize(client);
+	printf("Thread %d HANDOFF_OUT serialized client on conn %d\n", thread_id, client->fd);
 
 	// enqueue this handoff request
 	if (!out_ctx->queue) {
 		out_ctx->queue = handoff_out_queue_create();
 	}
 	handoff_out_enqueue(out_ctx->queue, client);
+	printf("Thread %d HANDOFF_OUT enqueued migration work to osd id %d for s3 client conn %d\n",
+		thread_id, osd_ids[out_ctx->osd_arr_index], client->fd);
 
 	// we have a connected fd and it is in epoll, let the epoll to consume this new request
 	if (out_ctx->is_fd_in_epoll)
@@ -429,6 +442,9 @@ void handoff_out_send(struct handoff_out *out_ctx)
 		handoff_out_dequeue(out_ctx->queue, (void **)&out_ctx->client);
 	}
 
+	printf("Thread %d HANDOFF_OUT dequeued migration work to osd id %d for s3 client conn %d, now start send\n",
+		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+
 	int ret = send(out_ctx->fd, out_ctx->client->proto_buf + out_ctx->client->proto_buf_sent,
 		out_ctx->client->proto_buf_len - out_ctx->client->proto_buf_sent, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
@@ -444,6 +460,9 @@ void handoff_out_send(struct handoff_out *out_ctx)
 
 	// send done
 	if (out_ctx->client->proto_buf_len == out_ctx->client->proto_buf_sent) {
+		printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d sent out, wait for handoff_done response\n",
+			out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+
 		if (out_ctx->recv_protobuf != NULL) {
 			free(out_ctx->recv_protobuf);
 		}
@@ -499,6 +518,9 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	if (out_ctx->recv_protobuf_received < out_ctx->recv_protobuf_len)
 		return;
 
+	printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d handoff_done response received\n",
+		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+
 	SocketSerialize *migration_info = socket_serialize__unpack(NULL,
 		out_ctx->recv_protobuf_len, out_ctx->recv_protobuf);
 	if (migration_info == NULL) {
@@ -515,12 +537,12 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	out_ctx->recv_protobuf_len = 0;
 	out_ctx->recv_protobuf_received = 0;
 
+	// TODO!!!: insert rule
+	printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d insert redir rule\n",
+		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+
 	free_http_client(out_ctx->client);
 	out_ctx->client = NULL;
-
-	// TODO!!!: insert rule
-
-
 	socket_serialize__free_unpacked(migration_info, NULL);
 
 	struct epoll_event event = {0};
