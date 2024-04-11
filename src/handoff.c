@@ -368,9 +368,10 @@ void handoff_out_reconnect(struct handoff_out *out_ctx) {
 
  // if we don't have a connection yet before send migration request to other node, need to create new connection
 void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
-	struct handoff_out *out_ctx, int osd_arr_index)
+	struct handoff_out *out_ctx, int osd_arr_index, int thread_id)
 {
 	out_ctx->osd_arr_index = osd_arr_index;
+	out_ctx->thread_id = thread_id;
 
 	// serialize state, we don't delete client until handoff_out is complete
 	handoff_out_serialize(client);
@@ -420,7 +421,6 @@ void handoff_out_send(struct handoff_out *out_ctx)
 		if (handoff_out_queue_is_empty(out_ctx->queue)) {
 			if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_DEL, out_ctx->fd, NULL) == -1) {
 				perror("epoll_ctl");
-				close(out_ctx->fd);
 				exit(EXIT_FAILURE);
 			}
 			out_ctx->is_fd_in_epoll = false;
@@ -533,7 +533,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	}
 }
 
-void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
+static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
 {
 	int ret = -1;
 
@@ -569,11 +569,6 @@ void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migratio
 
 	new_sin.sin_family = AF_INET;
 	new_sin.sin_port = migration_info->self_port;
-	// ???
-//		if (fd == control_fake_fds[worker_id])
-//			new_sin.sin_addr.s_addr = inet_addr(fake_ip);
-//		if (fd == control_original_fds[worker_id])
-//			new_sin.sin_addr.s_addr = inet_addr(original_ip);
 	new_sin.sin_addr.s_addr = get_my_osd_addr().sin_addr.s_addr;
 	new_sin2.sin_family = AF_INET;
 	new_sin2.sin_port = migration_info->peer_port;
@@ -671,6 +666,21 @@ void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migratio
 	// send ready to original server
 }
 
+void handoff_in_disconnect(struct handoff_in *in_ctx)
+{
+	printf("Thread %d HANDOFF_IN disconnect conn %d (epoll_fd %d, osd arr index %d, osd id %d)\n",
+		in_ctx->thread_id, in_ctx->fd, in_ctx->epoll_fd, in_ctx->osd_arr_index, osd_ids[in_ctx->osd_arr_index]);
+	// main thread will handle actual close and new accept comein
+	if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_DEL, in_ctx->fd, NULL) == -1) {
+		// maybe already closed by main
+		if (errno != EBADF) {
+			perror("epoll_ctl");
+			exit(EXIT_FAILURE);
+		}
+	}
+	in_ctx->fd = 0;
+}
+
 // handle handoff request - another end will not send another
 // request before current request is been acked
 // 1. loop until whole request received
@@ -682,11 +692,7 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 		int ret = recv(in_ctx->fd, &in_ctx->recv_protobuf_len, sizeof(in_ctx->recv_protobuf_len), 0);
 		if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
 			perror("handoff_in_recv recv");
-			// main thread will handle actual close and new accept comein
-			if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_DEL, in_ctx->fd, NULL) == -1) {
-				perror("epoll_ctl");
-				exit(EXIT_FAILURE);
-			}
+			handoff_in_disconnect(in_ctx);
 			return;
 		}
 		if (ret == -1 && errno == EAGAIN) {
@@ -708,11 +714,7 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 		in_ctx->recv_protobuf_len - in_ctx->recv_protobuf_received, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
 		perror("handoff_in_recv recv");
-		// main thread will handle actual close and new accept comein
-		if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_DEL, in_ctx->fd, NULL) == -1) {
-			perror("epoll_ctl");
-			exit(EXIT_FAILURE);
-		}
+		handoff_in_disconnect(in_ctx);
 		return;
 	}
 	if (ret == -1 && errno == EAGAIN) {
@@ -776,11 +778,7 @@ void handoff_in_send(struct handoff_in *in_ctx) {
 		in_ctx->send_protobuf_len - in_ctx->send_protobuf_sent, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
 		perror("handoff_in_send send");
-		// main thread will handle actual close and new accept comein
-		if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_DEL, in_ctx->fd, NULL) == -1) {
-			perror("epoll_ctl");
-			exit(EXIT_FAILURE);
-		}
+		handoff_in_disconnect(in_ctx);
 		return;
 	}
 	if (ret == -1 && errno == EAGAIN) {

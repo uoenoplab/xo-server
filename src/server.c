@@ -388,7 +388,7 @@ static void *conn_wait(void *arg)
 						//printf("To migrate to %d\n", c->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
-							&handoff_out_ctxs[osd_arr_index], osd_arr_index);
+							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
 					}
 				} else {
 					fprintf(stderr, "Thread %d S3_HTTP unhandled event (fd %d events %d)\n",
@@ -416,8 +416,9 @@ static void *conn_wait(void *arg)
 								param->thread_id, in_fd, osd_ids[osd_arr_index]);
 						}
 						handoff_in_ctxs[osd_arr_index].fd = in_fd;
-						handoff_in_ctxs[osd_arr_index].epoll_fd = in_fd;
+						handoff_in_ctxs[osd_arr_index].epoll_fd = epoll_fd;
 						handoff_in_ctxs[osd_arr_index].osd_arr_index = osd_arr_index;
+						handoff_in_ctxs[osd_arr_index].thread_id = param->thread_id;
 						handoff_in_ctxs[osd_arr_index].epoll_data_u32 = HANDOFF_IN_EVENT;
 						memset(&event, 0 , sizeof(event));
 						event.events = EPOLLIN;
@@ -439,10 +440,9 @@ static void *conn_wait(void *arg)
 						   (events[i].events & EPOLLHUP) ||
 						   (events[i].events & EPOLLRDHUP)){
 					fprintf(stderr, "Thread %d HANDOFF_IN received err/hup event"
-						"on conn %d, closing this conn (events %d osd id %d)\n",
+						"on conn %d, drop this conn (events %d osd id %d)\n",
 						param->thread_id, in_ctx->fd, events[i].events, osd_ids[in_ctx->osd_arr_index]);
-					in_ctx->fd = 0;
-					close(in_ctx->fd);
+					handoff_in_disconnect(in_ctx);
 					// We don't handle recv state here since all we can do is
 					// wait main thread accept then trigger eventfd
 				} else if (events[i].events & EPOLLIN) {
@@ -505,7 +505,7 @@ static void rearrange_osd_addrs(char *ifname)
 	char *my_ip_address = inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr )->sin_addr);
 
 	// put osd info of this node to end of array
-	for (int i = 0; i < num_osds - 1; i++) {
+	for (int i = 0; i < num_osds; i++) {
 		if (strcmp(osd_addr_strs[i], my_ip_address) == 0) {
 			char *osd_addr_str_tmp = osd_addr_strs[num_osds - 1];
 			osd_addr_strs[num_osds - 1] = osd_addr_strs[i];
@@ -517,8 +517,17 @@ static void rearrange_osd_addrs(char *ifname)
 		}
 	}
 
-	printf("My IP at interface %s is %s ; my OSD ID is %d\n",
-		ifname, osd_addr_strs[num_osds - 1], osd_ids[num_osds - 1]);
+	// current xo-server node is not an OSD
+	if (strcmp(osd_addr_strs[num_osds - 1], my_ip_address) != 0) {
+		osd_addr_strs[num_osds] = strdup(my_ip_address);
+		osd_ids[num_osds] = -1;
+		num_osds++;
+		printf("xo-server is not running on an OSD (interface %s, ip %s)\n",
+			ifname, osd_addr_strs[num_osds - 1]);
+	} else {
+		printf("xo-server is running on an OSD (interface %s, ip %s, osd_id)\n",
+			ifname, osd_addr_strs[num_osds - 1], osd_ids[num_osds - 1]);
+	}
 
 	for (int i = 0; i < num_osds; i++)
 	{
@@ -545,6 +554,10 @@ static int ceph_config_parser(void* user, const char* section, const char* name,
 				osd_addr_strs[num_osds] = strdup(value);
 				osd_ids[num_osds] = osd_id;
 				num_osds++;
+			}
+			if (num_osds == MAX_OSDS) {
+				fprintf(stderr, "num_osds %d exceeding MAX_OSDS\n");
+				exit(EXIT_FAILURE);
 			}
 		}
 	}
@@ -679,7 +692,7 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 				}
 
 				if (i != -1) {
-					printf("Accepted handoff_in fd %d (host %s, port %d, peer_id %d)\n",
+					printf("Accepted handoff_in fd %d (host %s, port %d, osd_id %d)\n",
 						in_fd, osd_addr_strs[i], ntohs(in_addr.sin_port), osd_ids[i]);
 				} else {
 					printf("Unkown handoff_in client, not in osd list, drop\n");
@@ -703,6 +716,7 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 					set_socket_non_blocking(in_fd);
 					handoff_in_fds[thread_id][osd_arr_index] = in_fd;
 					printf("Dispatch conn %d to thread %d\n", in_fd, thread_id);
+					// printf("combine_ints_to_uint64(in_fd %d, osd_arr_index %d)\n", in_fd, osd_arr_index);
 					uint64_t val = combine_ints_to_uint64(in_fd, osd_arr_index);
 					int ret = write(params[thread_id].handoff_in_eventfd, &val, sizeof(val));
 					if (ret != sizeof(uint64_t)) {

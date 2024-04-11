@@ -29,6 +29,7 @@ struct handoff_in {
 	int epoll_fd;
 	int fd;
         int osd_arr_index;
+        int thread_id; // just for print stuff
         uint8_t *recv_protobuf;
         uint32_t recv_protobuf_len;
         uint32_t recv_protobuf_received;
@@ -50,6 +51,7 @@ struct handoff_out {
 	int fd;
         bool is_fd_in_epoll;
         int osd_arr_index;
+        int thread_id;  // just for print stuff
         struct handoff_out_queue *queue;
         // handoff out request currently sending out, deququed from queue
         struct http_client *client;
@@ -63,10 +65,11 @@ struct handoff_out {
 void handoff_out_connect(struct handoff_out *out_ctx);
 void handoff_out_reconnect(struct handoff_out *out_ctx);
 void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
-	struct handoff_out *out_ctx, int osd_arr_index);
+	struct handoff_out *out_ctx, int osd_arr_index, int thread_id);
 void handoff_out_send(struct handoff_out *out_ctx);
 void handoff_out_recv(struct handoff_out *out_ctx);
 
+void handoff_in_disconnect(struct handoff_in *in_ctx);
 void handoff_in_recv(struct handoff_in *in_ctx);
 void handoff_in_send(struct handoff_in *in_ctx);
 
