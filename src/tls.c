@@ -9,16 +9,17 @@
 #include <asm/byteorder.h>
 
 #include "tls.h"
+#include "util.h"
 
-static void __attribute_maybe_unused__ hexdump(const char *title, void *buf, size_t len)
-{
-  printf("%s (%lu bytes) :\n", title, len);
-  for (size_t i = 0; i < len; i++) {
-    printf("%02hhX ", ((uint8_t *)buf)[i]);
-    if (i % 16 == 15) printf("\n");
-  }
-  printf("\n");
-}
+//static void __attribute_maybe_unused__ hexdump(const char *title, void *buf, size_t len)
+//{
+//  printf("%s (%lu bytes) :\n", title, len);
+//  for (size_t i = 0; i < len; i++) {
+//    printf("%02hhX ", ((uint8_t *)buf)[i]);
+//    if (i % 16 == 15) printf("\n");
+//  }
+//  printf("\n");
+//}
 
 static unsigned char hex_char_to_int(char c)
 {

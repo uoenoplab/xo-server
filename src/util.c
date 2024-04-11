@@ -6,6 +6,18 @@
 
 #include "util.h"
 
+//void __attribute_maybe_unused__ hexdump(const char *title, void *buf, size_t len)
+void hexdump(const char *title, void *buf, size_t len)
+{
+	printf("%s (%lu bytes) :\n", title, len);
+	for (size_t i = 0; i < len; i++) {
+		printf("%02hhX ", ((unsigned char *)buf)[i]);
+		if (i % 16 == 15) printf("\n");
+	}
+	printf("\n");
+}
+
+
 double elapsed_time(struct timespec a, struct timespec b)
 {
 	double elapsed = (double)(a.tv_sec - b.tv_sec) + (double)(a.tv_nsec - b.tv_nsec) / (double)1e9;

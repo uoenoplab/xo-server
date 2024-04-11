@@ -15,23 +15,24 @@ message socket_serialize {
         uint64 self_addr = 9;
         uint32 self_port = 10;
         uint64 peer_addr = 11;
-        uint32 peer_port = 12;
-        uint32 mss = 13;
-        uint32 send_wscale = 14;
-        uint32 recv_wscale = 15;
-        uint64 timestamp = 16;
-        uint64 snd_wl1 = 17;
-        uint64 snd_wnd = 18;
-        uint32 max_window = 19;
-        uint64 rev_wnd = 20;
-        uint64 rev_wup = 21;
-        int32 msg_type = 22;
-        uint32 ctrl_src_port = 23;
+	uint32 peer_mac = 12;
+        uint32 peer_port = 13;
+        uint32 mss = 14;
+        uint32 send_wscale = 15;
+        uint32 recv_wscale = 16;
+        uint64 timestamp = 17;
+        uint64 snd_wl1 = 18;
+        uint64 snd_wnd = 19;
+        uint32 max_window = 20;
+        uint64 rev_wnd = 21;
+        uint64 rev_wup = 22;
+        int32 msg_type = 23;
+        uint32 ctrl_src_port = 24;
 
 	// http client
-	int32 method = 24;
-	string bucket_name = 25;
-	string object_name = 26;
-	string uri_str = 27;
-	int64 object_size = 28;
+	int32 method = 25;
+	string bucket_name = 26;
+	string object_name = 27;
+	string uri_str = 28;
+	int64 object_size = 29;
 }

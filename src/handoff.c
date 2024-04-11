@@ -292,6 +292,8 @@ static void handoff_out_serialize(struct http_client *client)
 
 	migration_info.object_size = client->object_size;
 
+	migration_info.peer_mac = client->client_mac;
+
 	size_t proto_len = socket_serialize__get_packed_size(&migration_info);
 	uint32_t net_proto_len = htonl(proto_len);
 	uint8_t *proto_buf = malloc(sizeof(net_proto_len) + proto_len);
@@ -327,7 +329,7 @@ void handoff_out_connect(struct handoff_out *out_ctx) {
 	printf("Thread %d HANDOFF_OUT try connect to osd id %d (ip %s, port %d)\n",
 		out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
 		osd_addr_strs[out_ctx->osd_arr_index],
-		ntohl(osd_addrs[out_ctx->osd_arr_index].sin_port));
+		ntohs(osd_addrs[out_ctx->osd_arr_index].sin_port));
 
 	out_ctx->fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (out_ctx->fd == -1) {
@@ -483,6 +485,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 {
 	if (out_ctx->recv_protobuf == NULL) {
 		int ret = recv(out_ctx->fd, &out_ctx->recv_protobuf_len, sizeof(out_ctx->recv_protobuf_len), 0);
+		printf("ret = %d received recv protobuf len %ld\n", ret, out_ctx->recv_protobuf_len);
 		if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
 			perror("handoff_out_recv recv1");
 			handoff_out_reconnect(out_ctx);
@@ -491,11 +494,13 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		if (ret == -1 && errno == EAGAIN) {
 			return;
 		}
+		printf("before recv protobuf len %ld\n", out_ctx->recv_protobuf_len);
 		if (ret != sizeof(out_ctx->recv_protobuf_len)) {
 			fprintf(stderr, "%s: unable to handle the case TCP recv not equal to 4 bytes on header\n", __func__);
 			exit(EXIT_FAILURE);
 		}
 		out_ctx->recv_protobuf_len = ntohl(out_ctx->recv_protobuf_len);
+		printf("after recv protobuf len %ld\n", out_ctx->recv_protobuf_len);
 		if (out_ctx->recv_protobuf_len == 0) {
 			fprintf(stderr, "%s: out_ctx->recv_protobuf_len is zero\n", __func__);
 			exit(EXIT_FAILURE);
@@ -560,7 +565,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	int ret = -1;
 
 	int rfd;
-	struct sockaddr_in new_sin, new_sin2;
+	struct sockaddr_in server_sin, client_sin;
 	struct tcp_repair_window new_window;
 
 #ifdef PROFILE
@@ -589,16 +594,16 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_QUEUE_SEQ, &migration_info->ack, sizeof(migration_info->ack));
 	assert(ret == 0);
 
-	new_sin.sin_family = AF_INET;
-	new_sin.sin_port = migration_info->self_port;
-	new_sin.sin_addr.s_addr = get_my_osd_addr().sin_addr.s_addr;
-	new_sin2.sin_family = AF_INET;
-	new_sin2.sin_port = migration_info->peer_port;
-	new_sin2.sin_addr.s_addr = migration_info->peer_addr;
+	server_sin.sin_family = AF_INET;
+	server_sin.sin_port = migration_info->self_port;
+	server_sin.sin_addr.s_addr = get_my_osd_addr().sin_addr.s_addr;
+	client_sin.sin_family = AF_INET;
+	client_sin.sin_port = migration_info->peer_port;
+	client_sin.sin_addr.s_addr = migration_info->peer_addr;
 
-	ret = bind(rfd, (struct sockaddr *)&new_sin, sizeof(new_sin));
+	ret = bind(rfd, (struct sockaddr *)&server_sin, sizeof(server_sin));
 	assert(ret == 0);
-	ret = connect(rfd, (struct sockaddr *)&new_sin2, sizeof(new_sin2));
+	ret = connect(rfd, (struct sockaddr *)&client_sin, sizeof(client_sin));
 	assert(ret == 0);
 
 	socklen_t new_ulen = migration_info->unsentq_len;
@@ -665,27 +670,33 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 
 	// TODO!!!: implement http_client deserialize
 	// cannot recreate it before actually implemented
-	//struct http_client *client = create_http_client(epoll_fd, rfd);
-	//snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, migration_info->bucket_name);
-	//snprintf(client->object_name, MAX_OBJECT_NAME_SIZE, migration_info->object_name);
-	//client->uri_str = realloc(client->uri_str, sizeof(char) * (strlen(migration_info->uri_str) + 1));
-	//snprintf(client->uri_str, strlen(migration_info->uri_str) + 1, migration_info->uri_str);
-	//client->object_size = migration_info->object_size;
-	//client->method = migration_info->method;
+	struct http_client *client = create_http_client(in_ctx->epoll_fd, rfd);
+	snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, migration_info->bucket_name);
+	snprintf(client->object_name, MAX_OBJECT_NAME_SIZE, migration_info->object_name);
+	client->uri_str = realloc(client->uri_str, sizeof(char) * (strlen(migration_info->uri_str) + 1));
+	snprintf(client->uri_str, strlen(migration_info->uri_str) + 1, migration_info->uri_str);
+	client->object_size = migration_info->object_size;
+	client->method = migration_info->method;
 
-	/* quiting repair mode */
-	// ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
-	// assert(ret == 0);
-	// struct epoll_event event = {};
-	// client->fd = rfd;
-	// event.data.ptr = client;
-	// event.events = EPOLLIN;
-	// ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
-	// assert(ret == 0);
+	client->client_mac = migration_info->peer_mac;
 
 	// apply src IP modification
-	//
-	// send ready to original server
+	printf("deserialized: %s\n", client->uri_str);
+	apply_redirection_str(get_my_osd_addr_str(), "fake server MAC", migration_info->peer_addr, client->client_mac,
+			migration_info->self_port, migration_info->peer_port,
+			migration_info->self_addr, "fake server MAC", migration_info->peer_addr, client->client_mac,
+			migration_info->self_port, migration_info->peer_port, false);
+
+	/* quiting repair mode */
+	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
+	assert(ret == 0);
+	struct epoll_event event = {};
+	client->fd = rfd;
+	event.data.ptr = client;
+	event.events = EPOLLIN;
+	ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
+	assert(ret == 0);
+
 }
 
 void handoff_in_disconnect(struct handoff_in *in_ctx)
@@ -775,12 +786,13 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 	// no longer need
 	socket_serialize__free_unpacked(migration_info, NULL);
 
-	size_t proto_len = socket_serialize__get_packed_size(&migration_info_resp);
+	int proto_len = socket_serialize__get_packed_size(&migration_info_resp);
 	uint32_t net_proto_len = htonl(proto_len);
 	uint8_t *proto_buf = malloc(sizeof(net_proto_len) + proto_len);
 	socket_serialize__pack(&migration_info_resp, proto_buf + sizeof(net_proto_len));
 	// add length of proto_buf at the begin
 	memcpy(proto_buf, &net_proto_len, sizeof(net_proto_len));
+	hexdump("protobuf packed", proto_buf, sizeof(net_proto_len) + proto_len);
 
 	// change epoll to epollout
 	in_ctx->send_protobuf = proto_buf;
@@ -796,7 +808,7 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 }
 
 void handoff_in_send(struct handoff_in *in_ctx) {
-	int ret = send(in_ctx->fd, in_ctx->send_protobuf + in_ctx->send_protobuf_len,
+	int ret = send(in_ctx->fd, in_ctx->send_protobuf + in_ctx->send_protobuf_sent,
 		in_ctx->send_protobuf_len - in_ctx->send_protobuf_sent, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
 		perror("handoff_in_send send");

@@ -20,6 +20,13 @@
 #include <netinet/tcp.h>
 #include <sys/eventfd.h>
 
+//#include <arpa/inet.h>
+//#include <sys/socket.h>
+//#include <sys/ioctl.h>
+//#include <net/if.h>
+//#include <unistd.h>
+#include <net/if_arp.h>
+
 #include "http_client.h"
 #include "tls.h"
 #include "osd_mapping.h"
@@ -84,6 +91,49 @@ void handleCtrlC(int signum)
 	server_running = 0; // Set the flag to stop the server gracefully.
 }
 
+// Function to get MAC address from IP
+static int get_mac_address(const char *ip_address, char *mac_str) {
+	struct arpreq arp_req;
+	struct sockaddr_in *sin;
+	int sock_fd;
+	unsigned char *mac;
+
+	memset(&arp_req, 0, sizeof(struct arpreq));
+	sin = (struct sockaddr_in *)&arp_req.arp_pa;
+	sin->sin_family = AF_INET;
+
+	// Convert IP string to network format
+	if (inet_pton(AF_INET, ip_address, &sin->sin_addr) != 1) {
+		perror("inet_pton failed");
+		return -1;
+	}
+
+	// Create a socket to communicate with the kernel
+	if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+		perror("socket failed");
+		return -1;
+	}
+
+	// Copy the interface name to the request
+	strncpy(arp_req.arp_dev, "enp23s0f0np0", IFNAMSIZ);
+
+	// Query the kernel for the hardware (MAC) address
+	if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
+		perror("ioctl SIOCGARP failed");
+		close(sock_fd);
+		return -1;
+	}
+
+	// Extract the MAC address from the reply
+	mac = (unsigned char *)&arp_req.arp_ha.sa_data;
+	sprintf(mac_str, "%02x:%02x:%02x:%02x:%02x:%02x",
+			mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+	close(sock_fd);
+	return arp_req.arp_ha.sa_data;
+}
+
+
 void set_socket_non_blocking(int socket_fd)
 {
 	int flags = fcntl(socket_fd, F_GETFL, 0);
@@ -122,6 +172,8 @@ void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
 	event.events = EPOLLIN;
 	struct http_client *client = create_http_client(epoll_fd, new_socket);
 	client->epoll_data_u32 = S3_HTTP_EVENT;
+	char client_mac[32];
+	client->client_mac = get_mac_address(inet_ntoa(client_addr.sin_addr), client_mac);
 	event.data.ptr = client;
 
 	set_socket_non_blocking(new_socket);
@@ -261,6 +313,7 @@ static void *conn_wait(void *arg)
 
 	char client_data_buffer[BUF_SIZE];
 
+	int ret;
 	int epoll_fd, event_count;
 	struct epoll_event event;
 	struct epoll_event events[MAX_EVENTS];
@@ -367,6 +420,8 @@ static void *conn_wait(void *arg)
 
 		for (int i = 0; i < event_count; i++) {
 			uint32_t epoll_data_u32 = *((uint32_t*)events[i].data.ptr);
+			printf("epoll data u32 %d\n", epoll_data_u32);
+			fflush(stdout);
 			if (epoll_data_u32 == S3_HTTP_EVENT) {
 				// Handle events using callback functions
 				struct http_client *c = (struct http_client *)events[i].data.ptr;
@@ -519,7 +574,7 @@ static void rearrange_osd_addrs(char *ifname)
 		printf("xo-server is not running on an OSD (interface %s, ip %s)\n",
 			ifname, osd_addr_strs[num_osds - 1]);
 	} else {
-		printf("xo-server is running on an OSD (interface %s, ip %s, osd_id)\n",
+		printf("xo-server is running on an OSD (interface %s, ip %s, osd_id %d)\n",
 			ifname, osd_addr_strs[num_osds - 1], osd_ids[num_osds - 1]);
 	}
 
@@ -752,6 +807,10 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Usage: %s [interface] [threads]\n", argv[0]);
 		exit(1);
 	}
+
+	// initialize libforward-tc
+	err = init_forward(argv[1], "ingress", "1:");
+	assert(err >= 0);
 
 	err = tls_init();
 	if (err < 0) {
