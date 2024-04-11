@@ -308,9 +308,10 @@ static int on_headers_complete_cb(llhttp_t* parser)
 			ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &acting_primary_osd_id);
 			assert(ret == 0);
 			printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
-			//if (get_my_osd_id() == acting_primary_osd_id) {
-			//	handle_handoff_out_send(client, acting_primary_osd_id);
-			//}
+			if (get_my_osd_id() != acting_primary_osd_id) {
+				client->to_migrate = acting_primary_osd_id;
+				return 0;
+			}
 		}
 
 		init_object_get_request(client);

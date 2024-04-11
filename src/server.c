@@ -378,8 +378,9 @@ static void *conn_wait(void *arg)
 				}
 				else if (events[i].events & EPOLLIN) {
 					handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
+						printf("To migrate to %d\n", c->to_migrate);
 					if (c->to_migrate != -1) {
-						//printf("To migrate to %d\n", c->to_migrate);
+					//	printf("To migrate to %d\n", c->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);

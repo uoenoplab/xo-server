@@ -549,6 +549,8 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 		send_response(client);
 	}
 	else if (strlen(client->bucket_name) != 0 && strlen(client->object_name) != 0) {
+		// in case the connection is migrated, nothing to return here
+		if (client->to_migrate != -1) return;
 		/* wait for head read to complete */
 		rados_aio_wait_for_complete(client->comp);
 		rados_aio_release(client->comp);

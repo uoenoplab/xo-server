@@ -377,7 +377,7 @@ void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client
 	handoff_out_serialize(client);
 
 	// enqueue this handoff request
-	if (out_ctx->queue) {
+	if (!out_ctx->queue) {
 		out_ctx->queue = handoff_out_queue_create();
 	}
 	handoff_out_enqueue(out_ctx->queue, client);
