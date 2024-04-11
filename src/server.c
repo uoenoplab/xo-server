@@ -246,6 +246,7 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 
 	// TODO: we issue handoff request here if related flag in client detected
 	// need a queue to store handoff works?
+	//pthread_mutex_unlock(&(client->mutex));
 }
 
 static void *conn_wait(void *arg)
@@ -463,7 +464,7 @@ static void *conn_wait(void *arg)
 					// we have don't have a outstanding request to send, get one from queue
 					// , if queue emply delete itself from epoll and set in_epoll to false
 
-					// send until all request is sent out, if current request all sent out,
+						// send until all request is sent out, if current request all sent out,
 					// switch to epollin to wait for handoff done response
 				} else if (events[i].events & EPOLLIN) {
 					// handle handoff response, if all received, then swtich back to epollout

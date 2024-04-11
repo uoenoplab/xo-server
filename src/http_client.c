@@ -262,13 +262,13 @@ void send_response(struct http_client *client)
 	assert(ret == 0);
 }
 
-void aio_ack_callback(rados_completion_t comp, void *arg) {
-}
-
-void aio_commit_callback(rados_completion_t comp, void *arg) {
-	struct http_client *client = (struct http_client*)arg;
-	send_response(client);
-}
+//void aio_ack_callback(rados_completion_t comp, void *arg) {
+//}
+//
+//void aio_commit_callback(rados_completion_t comp, void *arg) {
+//	struct http_client *client = (struct http_client*)arg;
+//	send_response(client);
+//}
 
 static int on_reset_cb(llhttp_t *parser)
 {
@@ -440,15 +440,13 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 //	client->header_fields = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 //	client->header_values = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 
-	client->bucket_io_ctx = NULL;
-	client->data_io_ctx = NULL;
+	//rados_aio_create_completion((void*)client, aio_commit_callback, NULL, &client->comp);
+	client->bucket_io_ctx = -1;
+	client->data_io_ctx = -1;
 
 	client->prval = 0;
 	client->write_op = rados_create_write_op();
 	client->read_op = rados_create_read_op();
-
-	rados_aio_create_completion((void*)client, aio_ack_callback, aio_commit_callback, &(client->aio_completion));
-	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_head_read_completion));
 
 	client->tls.is_ssl = true;
 	client->tls.is_handshake_done = false;
@@ -474,11 +472,9 @@ void free_http_client(struct http_client *client)
 	free(client->data_payload);
 	free(client->put_buf);
 
-	rados_aio_release(client->aio_head_read_completion);
-	rados_aio_release(client->aio_completion);
-
 	rados_release_read_op(client->read_op);
 	rados_release_write_op(client->write_op);
+	//rados_aio_release(client->comp);
 
 	free(client);
 }
