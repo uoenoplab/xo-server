@@ -53,6 +53,7 @@ struct http_client {
 	rados_xattrs_iter_t iter;
 	rados_completion_t comp;
 	rados_read_op_t read_op;
+	rados_read_op_t write_op;
 
 	ssize_t data_payload_sent;
 	ssize_t data_payload_size;
@@ -89,7 +90,8 @@ struct http_client {
 	pthread_mutex_t mutex;
 	rados_ioctx_t *bucket_io_ctx;
 	rados_ioctx_t *data_io_ctx;
-	//rados_completion_t comp;
+	rados_completion_t aio_completion;
+	rados_completion_t aio_head_read_completion;
 
 	size_t object_size;
 	size_t object_offset;
@@ -147,6 +149,8 @@ void free_http_client(struct http_client *client);
 //static int on_message_complete_cb(llhttp_t* parser);
 //static int on_reset_cb(llhttp_t *parser);
 
+void aio_ack_callback(rados_completion_t comp, void *arg);
+void aio_commit_callback(rados_completion_t comp, void *arg);
 void send_client_data(struct http_client *client);
 void send_response(struct http_client *client);
 
