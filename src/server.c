@@ -129,7 +129,7 @@ static int get_mac_address(const char *ip_address, uint8_t *mac) {
 	memcpy(mac, arp_req.arp_ha.sa_data, sizeof(uint8_t) * 6);
 	printf("MAC addr of remote ip %s is ", ip_address);
 	print_mac_address(mac);
-	
+
 	close(sock_fd);
 	return 0;
 }
@@ -585,7 +585,7 @@ static void rearrange_osd_addrs(char *ifname)
 	}
 
 	char mac_str[18];
-	sprintf(mac_str, "%02x:%02x:%02x:%02x:%02x:%02x", 
+	sprintf(mac_str, "%02x:%02x:%02x:%02x:%02x:%02x",
 		my_mac[0], my_mac[1], my_mac[2], my_mac[3], my_mac[4], my_mac[5]);
 	// current xo-server node is not an OSD
 	if (strcmp(osd_addr_strs[num_osds - 1], my_ip_address) != 0) {

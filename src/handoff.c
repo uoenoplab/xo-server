@@ -359,12 +359,22 @@ void handoff_out_connect(struct handoff_out *out_ctx) {
 	}
 }
 
-// TODO: add a limit for reconnect
 void handoff_out_reconnect(struct handoff_out *out_ctx) {
-	printf("Thread %d HANDOFF_OUT try RE-connect to osd id %d (ip %s, port %d)\n",
+	out_ctx->reconnect_count++;
+	if (out_ctx->reconnect_count > MAX_HANDOFF_OUT_RECONNECT) {
+		fprintf(stderr, "Thread %d HANDOFF_OUT try RE-connect too many times (osd id %d, ip %s, port %d, reconnect count %d)\n",
+			out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
+			osd_addr_strs[out_ctx->osd_arr_index],
+			ntohs(osd_addrs[out_ctx->osd_arr_index].sin_port)
+			out_ctx->reconnect_count);
+		exit(EXIT_FAILURE);
+	}
+
+	printf("Thread %d HANDOFF_OUT try RE-connect (osd id %d, ip %s, port %d, reconnect count %d)\n",
 		out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
 		osd_addr_strs[out_ctx->osd_arr_index],
-		ntohl(osd_addrs[out_ctx->osd_arr_index].sin_port));
+		ntohs(osd_addrs[out_ctx->osd_arr_index].sin_port),
+		out_ctx->reconnect_count);
 
 	if (out_ctx->fd != 0) close(out_ctx->fd);
 	handoff_out_connect(out_ctx);
@@ -458,6 +468,7 @@ void handoff_out_send(struct handoff_out *out_ctx)
 		return;
 	}
 
+	out_ctx->reconnect_count = 0;
 	out_ctx->client->proto_buf_sent += ret;
 
 	// send done
@@ -519,6 +530,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		return;
 	}
 
+	out_ctx->reconnect_count = 0;
 	out_ctx->recv_protobuf_received += ret;
 	if (out_ctx->recv_protobuf_received < out_ctx->recv_protobuf_len)
 		return;
@@ -558,6 +570,15 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		close(out_ctx->fd);
 		exit(EXIT_FAILURE);
 	}
+}
+
+static void handoff_in_applyrule(SocketSerialize *migration_info)
+{
+	int ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
+				migration_info->self_port, migration_info->peer_port,
+				migration_info->self_addr, my_mac, migration_info->peer_addr, client->client_mac,
+				migration_info->self_port, migration_info->peer_port, false, false);
+	assert(ret == 0);
 }
 
 static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
@@ -668,8 +689,6 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	assert(ret == 0);
 #endif /* WITH_TLS */
 
-	// TODO!!!: implement http_client deserialize
-	// cannot recreate it before actually implemented
 	struct http_client *client = create_http_client(in_ctx->epoll_fd, rfd);
 	snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, migration_info->bucket_name);
 	snprintf(client->object_name, MAX_OBJECT_NAME_SIZE, migration_info->object_name);
@@ -680,22 +699,15 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	client->bucket_io_ctx = in_ctx->bucket_io_ctx;
 	client->data_io_ctx = in_ctx->data_io_ctx;
 
+	// Extract the MAC address from the reply
 	memcpy(client->client_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
-
-	// apply src IP modification
-//	
-//	// Extract the MAC address from the reply
-	
 	printf("migration peer mac is ");
 	print_mac_address(client->client_mac);
 
-
 	printf("deserialized: %s\n", client->uri_str);
-	ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
-				migration_info->self_port, migration_info->peer_port,
-				migration_info->self_addr, my_mac, migration_info->peer_addr, client->client_mac,
-				migration_info->self_port, migration_info->peer_port, false, false);
-	assert(ret == 0);
+
+	// apply src IP modification
+	handoff_in_applyrule(migration_info);
 
 	/* quiting repair mode */
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
