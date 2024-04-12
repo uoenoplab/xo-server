@@ -116,7 +116,7 @@ static int get_mac_address(const char *ip_address, uint8_t *mac) {
 	}
 
 	// Copy the interface name to the request
-	strncpy(arp_req.arp_dev, "enp23s0f0np0", IFNAMSIZ);
+	strncpy(arp_req.arp_dev, "ens1f0np0", IFNAMSIZ);
 
 	// Query the kernel for the hardware (MAC) address
 	if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
@@ -345,18 +345,18 @@ static void *conn_wait(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-//	// Add handoff_in eventfd into epoll
-//	memset(&event, 0 , sizeof(event));
-//	handoff_in_ctxs[num_osds - 1].epoll_data_u32 = HANDOFF_IN_EVENT;
-//	handoff_in_ctxs[num_osds - 1].epoll_fd = epoll_fd;
-//	handoff_in_ctxs[num_osds - 1].fd = param->handoff_in_eventfd;
-//	event.events = EPOLLIN;
-//	event.data.ptr = &handoff_in_ctxs[num_osds - 1];
-//	printf("Thread %d HANDOFF_IN regiester eventfd %d\n", param->thread_id, param->handoff_in_eventfd);
-//	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_eventfd, &event) == -1) {
-//		perror("epoll_ctl: efd");
-//		exit(EXIT_FAILURE);
-//	}
+	// Add handoff_in eventfd into epoll
+	memset(&event, 0 , sizeof(event));
+	handoff_in_ctxs[num_osds - 1].epoll_data_u32 = HANDOFF_IN_EVENT;
+	handoff_in_ctxs[num_osds - 1].epoll_fd = epoll_fd;
+	handoff_in_ctxs[num_osds - 1].fd = param->handoff_in_eventfd;
+	event.events = EPOLLIN;
+	event.data.ptr = &handoff_in_ctxs[num_osds - 1];
+	printf("Thread %d HANDOFF_IN regiester eventfd %d\n", param->thread_id, param->handoff_in_eventfd);
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_eventfd, &event) == -1) {
+		perror("epoll_ctl: efd");
+		exit(EXIT_FAILURE);
+	}
 
 	// Create a TCP socket
 	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
@@ -434,13 +434,13 @@ static void *conn_wait(void *arg)
 				}
 				else if (events[i].events & EPOLLIN) {
 					handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
-					//printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
-					//	param->thread_id, c->fd, c->to_migrate);
-					//if (c->to_migrate != -1) {
-					//	int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
-					//	handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
-					//		&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
-					//}
+					printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
+						param->thread_id, c->fd, c->to_migrate);
+					if (c->to_migrate != -1) {
+						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
+						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
+							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
+					}
 				} else {
 					fprintf(stderr, "Thread %d S3_HTTP unhandled event (fd %d events %d)\n",
 						param->thread_id, c->fd, events[i].events);
@@ -448,6 +448,8 @@ static void *conn_wait(void *arg)
 			}
 			else if (epoll_data_u32 == HANDOFF_IN_EVENT) {
 				struct handoff_in *in_ctx = (struct handoff_in *)events[i].data.ptr;
+				in_ctx->data_io_ctx = data_io_ctx;
+				in_ctx->bucket_io_ctx = bucket_io_ctx;
 				if (in_ctx->fd == param->handoff_in_eventfd) {
 					if (events[i].events & EPOLLIN) {
 						uint64_t val;
@@ -874,17 +876,17 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-//	int handoff_listen_fd = handoff_server_listen();
-//	if (handoff_listen_fd < 0) {
-//		fprintf(stderr, "%s: cannot init handoff server: %s\n", argv[0], strerror(-err));
-//		exit(EXIT_FAILURE);
-//	}
-//
-//	int handoff_epoll_fd = handoff_server_create_epoll(handoff_listen_fd);
-//	if (handoff_epoll_fd < 0) {
-//		fprintf(stderr, "%s: cannot init handoff : %s\n", argv[0], strerror(-err));
-//		exit(EXIT_FAILURE);
-//	}
+	int handoff_listen_fd = handoff_server_listen();
+	if (handoff_listen_fd < 0) {
+		fprintf(stderr, "%s: cannot init handoff server: %s\n", argv[0], strerror(-err));
+		exit(EXIT_FAILURE);
+	}
+
+	int handoff_epoll_fd = handoff_server_create_epoll(handoff_listen_fd);
+	if (handoff_epoll_fd < 0) {
+		fprintf(stderr, "%s: cannot init handoff : %s\n", argv[0], strerror(-err));
+		exit(EXIT_FAILURE);
+	}
 
 	cpu_set_t cpus;
 	pthread_attr_t attr;
@@ -924,9 +926,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	//handoff_server_loop(handoff_epoll_fd, handoff_listen_fd, param, nproc);
-	pause();
-	//printf("terminating\n");
+	handoff_server_loop(handoff_epoll_fd, handoff_listen_fd, param, nproc);
+	printf("terminating\n");
 
 	for (int i = 0; i < nproc; i++) {
 		if (pthread_kill(threads[i], SIGUSR1) != 0) {

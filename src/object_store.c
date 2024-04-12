@@ -617,7 +617,9 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 		send_response(client);
 	}
 	else if (strlen(client->bucket_name) != 0 && strlen(client->object_name) != 0) {
-		rados_aio_wait_for_complete(client->aio_head_read_completion);
+		printf("to migrateion is %d\n", client->to_migrate);
+		if (client->to_migrate == -1)
+			rados_aio_wait_for_complete(client->aio_head_read_completion);
 	}
 }
 

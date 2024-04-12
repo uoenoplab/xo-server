@@ -677,6 +677,8 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	snprintf(client->uri_str, strlen(migration_info->uri_str) + 1, migration_info->uri_str);
 	client->object_size = migration_info->object_size;
 	client->method = migration_info->method;
+	client->bucket_io_ctx = in_ctx->bucket_io_ctx;
+	client->data_io_ctx = in_ctx->data_io_ctx;
 
 	memcpy(client->client_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
 
@@ -704,6 +706,13 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	event.events = EPOLLIN;
 	ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
 	assert(ret == 0);
+
+	// check if HTTP GET
+        char datetime_str[256];
+        get_datetime_str(datetime_str, 256);
+
+	init_object_get_request(client);
+	complete_get_request(client, datetime_str);
 }
 
 void handoff_in_disconnect(struct handoff_in *in_ctx)

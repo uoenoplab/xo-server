@@ -36,6 +36,8 @@ struct handoff_in {
         uint8_t *send_protobuf;
         uint32_t send_protobuf_len; // include header uint32 size
         uint32_t send_protobuf_sent;
+	rados_ioctx_t data_io_ctx;
+	rados_ioctx_t bucket_io_ctx;
 };
 
 struct handoff_out_req;
