@@ -373,11 +373,11 @@ static inline void reset_client_send_buffer(struct http_client *client)
 
 static int tls_make_ktls(struct http_client *client, uint64_t recv_rec_seqnum) {
 	struct tls12_crypto_info_aes_gcm_256 crypto_info_send = {0};
-	struct tls12_crypto_info_aes_gcm_256 crypto_info_read = {0};
+	struct tls12_crypto_info_aes_gcm_256 crypto_info_recv = {0};
 	crypto_info_send.info.version = TLS_1_3_VERSION;
-	crypto_info_read.info.version = TLS_1_3_VERSION;
+	crypto_info_recv.info.version = TLS_1_3_VERSION;
 	crypto_info_send.info.cipher_type = TLS_CIPHER_AES_GCM_256;
-	crypto_info_read.info.cipher_type = TLS_CIPHER_AES_GCM_256;
+	crypto_info_recv.info.cipher_type = TLS_CIPHER_AES_GCM_256;
 
 	unsigned char iv_buffer[TLS_CIPHER_AES_GCM_256_IV_SIZE + TLS_CIPHER_AES_GCM_256_SALT_SIZE];
 
@@ -395,12 +395,12 @@ static int tls_make_ktls(struct http_client *client, uint64_t recv_rec_seqnum) {
 	}
 
 	hkdf_tls13_sha384_expand(kctx, client->tls.client_traffic_secret, sizeof(client->tls.client_traffic_secret),
-		crypto_info_read.key, sizeof(crypto_info_read.key), "key");
+		crypto_info_recv.key, sizeof(crypto_info_recv.key), "key");
 	hkdf_tls13_sha384_expand(kctx, client->tls.client_traffic_secret, sizeof(client->tls.client_traffic_secret),
 		iv_buffer, sizeof(iv_buffer), "iv");
-	memcpy(crypto_info_read.iv, iv_buffer + 4, TLS_CIPHER_AES_GCM_256_IV_SIZE);
-  	memcpy(crypto_info_read.salt, iv_buffer, TLS_CIPHER_AES_GCM_256_SALT_SIZE);
-	*((__be64 *)crypto_info_read.rec_seq) = __be64_to_cpu(recv_rec_seqnum);
+	memcpy(crypto_info_recv.iv, iv_buffer + 4, TLS_CIPHER_AES_GCM_256_IV_SIZE);
+  	memcpy(crypto_info_recv.salt, iv_buffer, TLS_CIPHER_AES_GCM_256_SALT_SIZE);
+	*((__be64 *)crypto_info_recv.rec_seq) = __be64_to_cpu(recv_rec_seqnum);
 
 	hkdf_tls13_sha384_expand(kctx, client->tls.server_traffic_secret, sizeof(client->tls.server_traffic_secret),
 		crypto_info_send.key, sizeof(crypto_info_send.key), "key");
@@ -421,9 +421,9 @@ static int tls_make_ktls(struct http_client *client, uint64_t recv_rec_seqnum) {
 		return -1;
 	}
 
-	if (setsockopt(client->fd, SOL_TLS, TLS_RX, &crypto_info_read,
-					sizeof(crypto_info_read)) < 0) {
-		fprintf(stderr, "Couldn't set TLS_TX option (%s)\n", strerror(errno));
+	if (setsockopt(client->fd, SOL_TLS, TLS_RX, &crypto_info_recv,
+					sizeof(crypto_info_recv)) < 0) {
+		fprintf(stderr, "Couldn't set TLS_RX option (%s)\n", strerror(errno));
 		return -1;
 	}
 

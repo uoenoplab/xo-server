@@ -130,6 +130,8 @@ struct http_client {
 
 	// handoff
 	int to_migrate;
+	bool from_migrate;
+
 	uint8_t *proto_buf;
 	uint32_t proto_buf_len; // include the uint32 header size
 	uint32_t proto_buf_sent;

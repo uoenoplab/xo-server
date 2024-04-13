@@ -569,7 +569,7 @@ static int rearrange_osd_addrs(const char *ifname)
 	if (ioctl(fd, SIOCGIFHWADDR, &ifr) == -1) {
 		perror("IOCTL SIOCGIFHWADDR failed");
 		close(fd);
-		return -1;
+		exit(EXIT_FAILURE);
 	}
 
 	memcpy(my_mac, ifr.ifr_hwaddr.sa_data, 6);

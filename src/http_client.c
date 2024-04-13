@@ -459,6 +459,8 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 
 	client->prval = 0;
 
+	client->from_migrate = false;
+
 	client->tls.is_ssl = true;
 	client->tls.is_handshake_done = false;
 	client->tls.is_ktls_set = false;

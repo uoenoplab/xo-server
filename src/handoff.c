@@ -9,6 +9,8 @@
 #include <assert.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
+#include <linux/tls.h>
+#include <netinet/tcp.h>
 
 #include "proto/socket_serialize.pb-c.h"
 
@@ -237,10 +239,30 @@ static void handoff_out_serialize(struct http_client *client)
 		ret = recv(fd, rcvbuf, recvq_len + 1, peek);
 		assert(ret == recvq_len);
 	}
-//#ifdef PROFILE
-//	clock_gettime(CLOCK_MONOTONIC, &end_time1);
-//	printf("serialize tcp + tls: %lf\n", diff_timespec(&end_time1, &start_time1));
-//#endif /* PROFILE */
+
+	int ktlsbuf_len = 0;
+	uint8_t *ktlsbuf_data = NULL;
+
+	if (client->tls.is_ktls_set) {
+		ktlsbuf_len = 2 * sizeof(struct tls12_crypto_info_aes_gcm_256);
+		ktlsbuf_data = malloc(ktlsbuf_len);
+
+		struct tls12_crypto_info_aes_gcm_256 *crypto_info_send = ktlsbuf_data;
+		struct tls12_crypto_info_aes_gcm_256 *crypto_info_recv = ktlsbuf_data +
+			sizeof(struct tls12_crypto_info_aes_gcm_256);
+
+		socklen_t optlen = sizeof(struct tls12_crypto_info_aes_gcm_256);
+		if (getsockopt(fd, SOL_TLS, TLS_TX, crypto_info_send, &optlen)) {
+			fprintf(stderr, "Couldn't get TLS_TX option (%s)\n", strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+
+		optlen = sizeof(struct tls12_crypto_info_aes_gcm_256);
+		if (getsockopt(fd, SOL_TLS, TLS_RX, crypto_info_recv, &optlen)) {
+			fprintf(stderr, "Couldn't get TLS_RX option (%s)\n", strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+	}
 
 	/* clean up */
 	ret = epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
@@ -273,13 +295,8 @@ static void handoff_out_serialize(struct http_client *client)
 	migration_info.sendq.data = sndbuf;
 	migration_info.recvq.len = recvq_len;
 	migration_info.recvq.data = rcvbuf;
-
-// TODO!!!: serialize ktls
-#ifdef WITH_TLS
-	//tls variables setting up
-	migration_info.ktlsbuf.len = tls_export_context_size;
-	migration_info.ktlsbuf.data = tls_export_buf;
-#endif /* WITH_TLS */
+	migration_info.ktlsbuf.len = ktlsbuf_len;
+	migration_info.ktlsbuf.data = ktlsbuf_data;
 
 	// serialize http client
 	migration_info.method = client->method;
@@ -311,6 +328,10 @@ static void handoff_out_serialize(struct http_client *client)
 	free(migration_info.uri_str);
 	free(migration_info.object_name);
 	free(migration_info.bucket_name);
+
+	if (ktlsbuf_data != NULL) {
+		free(ktlsbuf_data);
+	}
 }
 
 static void set_socket_non_blocking(int socket_fd)
@@ -368,7 +389,7 @@ void handoff_out_reconnect(struct handoff_out *out_ctx) {
 		fprintf(stderr, "Thread %d HANDOFF_OUT try RE-connect too many times (osd id %d, ip %s, port %d, reconnect count %d)\n",
 			out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
 			osd_addr_strs[out_ctx->osd_arr_index],
-			ntohs(osd_addrs[out_ctx->osd_arr_index].sin_port)
+			ntohs(osd_addrs[out_ctx->osd_arr_index].sin_port),
 			out_ctx->reconnect_count);
 		exit(EXIT_FAILURE);
 	}
@@ -575,15 +596,6 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	}
 }
 
-static void handoff_in_applyrule(SocketSerialize *migration_info)
-{
-	int ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
-				migration_info->self_port, migration_info->peer_port,
-				migration_info->self_addr, my_mac, migration_info->peer_addr, client->client_mac,
-				migration_info->self_port, migration_info->peer_port, false, false);
-	assert(ret == 0);
-}
-
 static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
 {
 	int ret = -1;
@@ -675,22 +687,34 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &new_window, sizeof(new_window));
 	assert(ret == 0);
 
-	// TODO!!!: ktls deserialize
-#ifdef WITH_TLS
-	if (migration_info->buf.len > 0) {
-		imported_context = tls_import_context(migration_info->buf.data, migration_info->buf.len);
-		if (imported_context) {
-			fd_state[rfd].tls_context = imported_context;
-			tls_make_exportable(fd_state[rfd].tls_context, 1);
+	if (migration_info->ktlsbuf.len != 0) {
+		if (migration_info->ktlsbuf.len != 2 * sizeof(struct tls12_crypto_info_aes_gcm_256)) {
+			fprintf(stderr, "incorrect ktlsbuf length (%ld)", migration_info->ktlsbuf.len);
+			exit(EXIT_FAILURE);
 		}
-		else {
-			perror("tls_import_context");
-			exit(0);
+
+		struct tls12_crypto_info_aes_gcm_256 *crypto_info_send =
+			migration_info->ktlsbuf.data;
+		struct tls12_crypto_info_aes_gcm_256 *crypto_info_recv =
+			migration_info->ktlsbuf.data + sizeof(struct tls12_crypto_info_aes_gcm_256);
+
+		if (setsockopt(rfd, SOL_TCP, TCP_ULP, "tls", sizeof("tls")) < 0) {
+			fprintf(stderr, "set ULP tls fail (%s)\n", strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+
+		if (setsockopt(rfd, SOL_TLS, TLS_TX, crypto_info_send,
+						sizeof(*crypto_info_send)) < 0) {
+			fprintf(stderr, "Couldn't set TLS_TX option (%s)\n", strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+
+		if (setsockopt(rfd, SOL_TLS, TLS_RX, crypto_info_recv,
+						sizeof(*crypto_info_recv)) < 0) {
+			fprintf(stderr, "Couldn't set TLS_RX option (%s)\n", strerror(errno));
+			exit(EXIT_FAILURE);
 		}
 	}
-	ret = tls_make_ktls(fd_state[rfd].tls_context, rfd);
-	assert(ret == 0);
-#endif /* WITH_TLS */
 
 	struct http_client *client = create_http_client(in_ctx->epoll_fd, rfd);
 	snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, "%s", migration_info->bucket_name);
@@ -701,6 +725,15 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	client->method = migration_info->method;
 	client->bucket_io_ctx = in_ctx->bucket_io_ctx;
 	client->data_io_ctx = in_ctx->data_io_ctx;
+	client->from_migrate = true;
+
+	if (migration_info->ktlsbuf.len) {
+		client->tls.is_ssl = true;
+		client->tls.is_handshake_done = true;
+		client->tls.is_ktls_set = true;
+	} else {
+		client->tls.is_ssl = false;
+	}
 
 	// Extract the MAC address from the reply
 	memcpy(client->client_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
@@ -710,7 +743,11 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	printf("deserialized: %s\n", client->uri_str);
 
 	// apply src IP modification
-	handoff_in_applyrule(migration_info);
+	ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
+				migration_info->self_port, migration_info->peer_port,
+				migration_info->self_addr, my_mac, migration_info->peer_addr, client->client_mac,
+				migration_info->self_port, migration_info->peer_port, false, false);
+	assert(ret == 0);
 
 	/* quiting repair mode */
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));

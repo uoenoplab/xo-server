@@ -1,10 +1,8 @@
 syntax = "proto3";
 
 message socket_serialize {
-        //tls info: depends on tlse serialization
-        bytes buf = 1;
-
         //tcp info
+        bytes ktlsbuf = 1;
         uint64 seq = 2;
         uint64 ack = 3;
         bytes sendq = 4;
