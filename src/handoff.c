@@ -13,8 +13,10 @@
 #include "proto/socket_serialize.pb-c.h"
 
 #include "handoff.h"
+#include "object_store.h"
 #include "http_client.h"
 #include "osd_mapping.h"
+#include "forward.h"
 
 /*
 
@@ -127,9 +129,10 @@ restore_queue(int fd, int q, const uint8_t *buf, uint32_t len, int need_repair)
 {
 	int ret,  max_chunk = len, off = 0;
 
-	if (need_repair)
+	if (need_repair) {
 		ret = setsockopt(fd, IPPROTO_TCP, TCP_REPAIR_QUEUE, &q, sizeof(q));
        		assert(ret == 0);
+	}
 	do {
 		int chunk = len > max_chunk ? max_chunk : len;
 		ret = send(fd, buf + off, chunk, 0);
@@ -485,7 +488,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 {
 	if (out_ctx->recv_protobuf == NULL) {
 		int ret = recv(out_ctx->fd, &out_ctx->recv_protobuf_len, sizeof(out_ctx->recv_protobuf_len), 0);
-		printf("ret = %d received recv protobuf len %ld\n", ret, out_ctx->recv_protobuf_len);
+		printf("ret = %d received recv protobuf len %d\n", ret, out_ctx->recv_protobuf_len);
 		if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
 			perror("handoff_out_recv recv1");
 			handoff_out_reconnect(out_ctx);
@@ -494,13 +497,13 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		if (ret == -1 && errno == EAGAIN) {
 			return;
 		}
-		printf("before recv protobuf len %ld\n", out_ctx->recv_protobuf_len);
+		printf("before recv protobuf len %d\n", out_ctx->recv_protobuf_len);
 		if (ret != sizeof(out_ctx->recv_protobuf_len)) {
 			fprintf(stderr, "%s: unable to handle the case TCP recv not equal to 4 bytes on header\n", __func__);
 			exit(EXIT_FAILURE);
 		}
 		out_ctx->recv_protobuf_len = ntohl(out_ctx->recv_protobuf_len);
-		printf("after recv protobuf len %ld\n", out_ctx->recv_protobuf_len);
+		printf("after recv protobuf len %d\n", out_ctx->recv_protobuf_len);
 		if (out_ctx->recv_protobuf_len == 0) {
 			fprintf(stderr, "%s: out_ctx->recv_protobuf_len is zero\n", __func__);
 			exit(EXIT_FAILURE);
@@ -671,10 +674,10 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	// TODO!!!: implement http_client deserialize
 	// cannot recreate it before actually implemented
 	struct http_client *client = create_http_client(in_ctx->epoll_fd, rfd);
-	snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, migration_info->bucket_name);
-	snprintf(client->object_name, MAX_OBJECT_NAME_SIZE, migration_info->object_name);
+	snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, "%s", migration_info->bucket_name);
+	snprintf(client->object_name, MAX_OBJECT_NAME_SIZE, "%s", migration_info->object_name);
 	client->uri_str = realloc(client->uri_str, sizeof(char) * (strlen(migration_info->uri_str) + 1));
-	snprintf(client->uri_str, strlen(migration_info->uri_str) + 1, migration_info->uri_str);
+	snprintf(client->uri_str, strlen(migration_info->uri_str) + 1, "%s", migration_info->uri_str);
 	client->object_size = migration_info->object_size;
 	client->method = migration_info->method;
 	client->bucket_io_ctx = in_ctx->bucket_io_ctx;

@@ -9,7 +9,10 @@ include(${CMAKE_SOURCE_DIR}/cmake/modules/Findlibrados2.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/modules/FindProtobufC.cmake)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/modules")
 
-#option(BUILD_SHARED_LIBS "Build using shared libraries" OFF)
+option(USE_ASYNC_WRITE "Build using rados aio for write" OFF)
+option(USE_ASYNC_READ "Build using rados aio for read" OFF)
+option(USE_MIGRATION "Build migration support" OFF)
+
 FetchContent_Declare(llhttp
     URL "https://github.com/nodejs/llhttp/archive/refs/tags/release/v8.1.0.tar.gz")
 
@@ -101,6 +104,17 @@ set_target_properties(http_server PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     C_STANDARD 11)
 
+if (USE_ASYNC_WRITE)
+	list(APPEND HTTP_SERVER_DEF -DASYNC_WRITE)
+endif()
+if (USE_ASYNC_READ)
+	list(APPEND HTTP_SERVER_DEF -DASYNC_READ)
+endif()
+if (USE_MIGRATION)
+	list(APPEND HTTP_SERVER_DEF -DUSE_MIGRATION)
+endif()
+
+target_compile_definitions(http_server PUBLIC ${HTTP_SERVER_DEF})
 target_compile_options(http_server PRIVATE
     -fstack-protector-all -Wall -Wextra -ggdb -O3 -g)
 #-fsanitize=undefined,address -fno-omit-frame-pointer -fstack-protector -Wall -Wextra -ggdb -O3 -g)
@@ -114,6 +128,7 @@ add_executable(server.out src/server.c src/tls.c)
 add_dependencies(server.out libforward-tc http_server)
 
 target_include_directories(server.out PUBLIC
+    ${SOURCE_DIR}/include
     ${llhttp_SOURCE_DIR}/include
     ${INIH_INCLUDE_DIRS}
     ${LIBXML2_INCLUDE_DIR}
@@ -146,6 +161,9 @@ target_link_options(server.out PRIVATE
 file(COPY ${CMAKE_SOURCE_DIR}/assets DESTINATION ${CMAKE_BINARY_DIR})
 
 message(STATUS "Building xo server binary")
+message(STATUS "Build with rados aio for write: " ${USE_ASYNC_WRITE})
+message(STATUS "Build with rados aio for read: " ${USE_ASYNC_READ})
+message(STATUS "Build with connection migration support: " ${USE_MIGRATION})
 
 # uninstall target
 #if(NOT TARGET uninstall)

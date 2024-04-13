@@ -20,11 +20,6 @@
 #include <netinet/tcp.h>
 #include <sys/eventfd.h>
 
-//#include <arpa/inet.h>
-//#include <sys/socket.h>
-//#include <sys/ioctl.h>
-//#include <net/if.h>
-//#include <unistd.h>
 #include <net/if_arp.h>
 
 #include "http_client.h"
@@ -32,6 +27,8 @@
 #include "osd_mapping.h"
 
 #include "handoff.h"
+
+#include "forward.h"
 
 #define S3_HTTP_PORT 8080
 #define HANDOFF_CTRL_PORT 8081
@@ -76,6 +73,7 @@ struct thread_param {
 	// int server_fd;
 	rados_t cluster;
 	int handoff_in_eventfd;
+	char ifname[32];
 };
 
 void split_uint64_to_ints(uint64_t value, int *high, int *low) {
@@ -94,7 +92,7 @@ void handleCtrlC(int signum)
 }
 
 // Function to get MAC address from IP
-static int get_mac_address(const char *ip_address, uint8_t *mac) {
+static int get_mac_address(const char *ifname, const char *ip_address, uint8_t *mac) {
 	struct arpreq arp_req;
 	struct sockaddr_in *sin;
 	int sock_fd;
@@ -116,7 +114,7 @@ static int get_mac_address(const char *ip_address, uint8_t *mac) {
 	}
 
 	// Copy the interface name to the request
-	strncpy(arp_req.arp_dev, "ens1f0np0", IFNAMSIZ);
+	strncpy(arp_req.arp_dev, ifname, IFNAMSIZ-1);
 
 	// Query the kernel for the hardware (MAC) address
 	if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
@@ -150,7 +148,7 @@ void set_socket_non_blocking(int socket_fd)
 	}
 }
 
-void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
+void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int thread_id)
 {
 	pid_t tid = gettid();
 
@@ -173,8 +171,8 @@ void handle_new_connection(int epoll_fd, int server_fd, int thread_id)
 	event.events = EPOLLIN;
 	struct http_client *client = create_http_client(epoll_fd, new_socket);
 	client->epoll_data_u32 = S3_HTTP_EVENT;
-	int ret = get_mac_address(inet_ntoa(client_addr.sin_addr), client->client_mac);
-	assert(err == 0);
+	int ret = get_mac_address(ifname, inet_ntoa(client_addr.sin_addr), client->client_mac);
+	assert(ret == 0);
 	event.data.ptr = client;
 
 	set_socket_non_blocking(new_socket);
@@ -258,7 +256,7 @@ static ssize_t handle_client_data_ssl(struct http_client *client, SSL_CTX *ssl_c
 	// Handle handshake?
 }
 
-void handle_client_data(int epoll_fd, struct http_client *client,
+int handle_client_data(int epoll_fd, struct http_client *client,
 	char *client_data_buffer, int thread_id, rados_ioctx_t bucket_io_ctx,
 	rados_ioctx_t data_io_ctx, SSL_CTX *ssl_ctx)
 {
@@ -272,14 +270,14 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 			printf("Thread %d: Client disconnected: %d\n", thread_id, client->fd);
 		} else if (errno == EAGAIN && client->tls.is_ssl && client->tls.is_ktls_set) {
 			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
-			return;
+			return 1;
 		} else {
 			perror("recv");
 		}
 
 		// Remove the client socket from the epoll event list
 		handle_client_disconnect(epoll_fd, client); // Handle client disconnection
-		return;
+		return 1;
 	}
 
 	if (client->tls.is_ssl){
@@ -288,12 +286,14 @@ void handle_client_data(int epoll_fd, struct http_client *client,
 			fprintf(stderr, "%s: handle_client_data_ssl returned %ld\n", __func__, bytes_received);
 			exit(EXIT_FAILURE);
 		}
-		if (bytes_received == 0) return;
+		if (bytes_received == 0) return 1;
 	}
 
 	client->bucket_io_ctx = bucket_io_ctx;
 	client->data_io_ctx = data_io_ctx;
 	do_llhttp_execute(client, client_data_buffer, bytes_received);
+
+	return 0;
 }
 
 static void *conn_wait(void *arg)
@@ -345,6 +345,7 @@ static void *conn_wait(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
+#ifdef USE_MIGRATION
 	// Add handoff_in eventfd into epoll
 	memset(&event, 0 , sizeof(event));
 	handoff_in_ctxs[num_osds - 1].epoll_data_u32 = HANDOFF_IN_EVENT;
@@ -357,6 +358,7 @@ static void *conn_wait(void *arg)
 		perror("epoll_ctl: efd");
 		exit(EXIT_FAILURE);
 	}
+#endif
 
 	// Create a TCP socket
 	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
@@ -421,31 +423,33 @@ static void *conn_wait(void *arg)
 
 		for (int i = 0; i < event_count; i++) {
 			uint32_t epoll_data_u32 = *((uint32_t*)events[i].data.ptr);
-			printf("epoll data u32 %d\n", epoll_data_u32);
-			fflush(stdout);
 			if (epoll_data_u32 == S3_HTTP_EVENT) {
 				// Handle events using callback functions
 				struct http_client *c = (struct http_client *)events[i].data.ptr;
 				if (c->fd == server_fd) {
-					handle_new_connection(epoll_fd, server_fd, thread_id);
+					handle_new_connection(epoll_fd, param->ifname, server_fd, thread_id);
 				}
 				else if (events[i].events & EPOLLOUT) {
 					send_client_data(c);
 				}
 				else if (events[i].events & EPOLLIN) {
-					handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
-					printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
-						param->thread_id, c->fd, c->to_migrate);
-					if (c->to_migrate != -1) {
+					ret = handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
+#ifdef USE_MIGRATION
+					// check if ret okay, connection could be closed
+					if (ret == 0 && c->to_migrate != -1) {
+						printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
+							param->thread_id, c->fd, c->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
 					}
+#endif
 				} else {
 					fprintf(stderr, "Thread %d S3_HTTP unhandled event (fd %d events %d)\n",
 						param->thread_id, c->fd, events[i].events);
 				}
 			}
+#ifdef USE_MIGRATION
 			else if (epoll_data_u32 == HANDOFF_IN_EVENT) {
 				struct handoff_in *in_ctx = (struct handoff_in *)events[i].data.ptr;
 				in_ctx->data_io_ctx = data_io_ctx;
@@ -454,7 +458,7 @@ static void *conn_wait(void *arg)
 					if (events[i].events & EPOLLIN) {
 						uint64_t val;
 						int in_fd, osd_arr_index;
-						int ret = read(param->handoff_in_eventfd, &val, sizeof(val));
+						ret = read(param->handoff_in_eventfd, &val, sizeof(val));
 						if (ret != sizeof(val)) {
 							perror("read eventfd");
 							exit(EXIT_FAILURE);
@@ -523,7 +527,9 @@ static void *conn_wait(void *arg)
 					fprintf(stderr, "Thread %d HANDOFF_OUT unhandled event (fd %d events %d)\n",
 						param->thread_id, events[i].data.fd, events[i].events);
 				}
-			} else {
+			}
+#endif
+			else {
 				fprintf(stderr, "Thread %d unhandled event (events %d data.u32 %d)\n",
 					param->thread_id, events[i].events, epoll_data_u32);
 			}
@@ -532,9 +538,8 @@ static void *conn_wait(void *arg)
 
 	// TODO: close all handoff_out sockets
 	// TODO: close all pending buffer
-
-	close(epoll_fd);
 	close(server_fd);
+	close(epoll_fd);
 
 	tls_uninit_ctx(ssl_ctx);
 	free_http_client(server_client);
@@ -545,12 +550,12 @@ static void *conn_wait(void *arg)
 	return NULL;
 }
 
-static void rearrange_osd_addrs(char *ifname)
+static int rearrange_osd_addrs(const char *ifname)
 {
 	struct ifreq ifr;
 	int fd = socket(AF_INET, SOCK_DGRAM, 0);
 	ifr.ifr_addr.sa_family = AF_INET;
-	strncpy(ifr.ifr_name , ifname , IFNAMSIZ);
+	strncpy(ifr.ifr_name, ifname , IFNAMSIZ);
 
 	if (ioctl(fd, SIOCGIFADDR, &ifr) == -1 ) {
 		perror("IOCTL SIOCGIFADDR failed");
@@ -611,6 +616,7 @@ static void rearrange_osd_addrs(char *ifname)
 	}
 
 	num_peers = num_osds - 1;
+	return 0;
 }
 
 static int ceph_config_parser(void* user, const char* section, const char* name, const char* value)
@@ -626,7 +632,7 @@ static int ceph_config_parser(void* user, const char* section, const char* name,
 				num_osds++;
 			}
 			if (num_osds == MAX_OSDS) {
-				fprintf(stderr, "num_osds %d exceeding MAX_OSDS\n");
+				fprintf(stderr, "num_osds %d exceeding MAX_OSDS %d\n", num_osds, MAX_OSDS);
 				exit(EXIT_FAILURE);
 			}
 		}
@@ -856,7 +862,8 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	rearrange_osd_addrs(ifname);
+	err = rearrange_osd_addrs(ifname);
+	assert(err == 0);
 
 	err = rados_create2(&cluster, "ceph", "client.admin", 0);
 	if (err < 0) {
@@ -876,6 +883,7 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
+#ifdef USE_MIGRATION
 	int handoff_listen_fd = handoff_server_listen();
 	if (handoff_listen_fd < 0) {
 		fprintf(stderr, "%s: cannot init handoff server: %s\n", argv[0], strerror(-err));
@@ -887,6 +895,7 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "%s: cannot init handoff : %s\n", argv[0], strerror(-err));
 		exit(EXIT_FAILURE);
 	}
+#endif
 
 	cpu_set_t cpus;
 	pthread_attr_t attr;
@@ -909,6 +918,7 @@ int main(int argc, char *argv[])
 		//param[i].server_fd = server_fd;
 		param[i].cluster = cluster;
 		param[i].handoff_in_eventfd = eventfd(0, 0);
+		strncpy(param[i].ifname, ifname, 32);
 		if (param[i].handoff_in_eventfd == -1) {
 			perror("eventfd");
 			exit(EXIT_FAILURE);
@@ -926,7 +936,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
+#ifdef USE_MIGRATION
 	handoff_server_loop(handoff_epoll_fd, handoff_listen_fd, param, nproc);
+#else
+	pause();
+#endif
 	printf("terminating\n");
 
 	for (int i = 0; i < nproc; i++) {

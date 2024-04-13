@@ -308,10 +308,12 @@ static int on_headers_complete_cb(llhttp_t* parser)
 			ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &acting_primary_osd_id);
 			assert(ret == 0);
 			printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
+#ifdef USE_MIGRATION
 			if (get_my_osd_id() != acting_primary_osd_id) {
 				client->to_migrate = acting_primary_osd_id;
 				return 0;
 			}
+#endif
 		}
 
 		init_object_get_request(client);
@@ -450,8 +452,8 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 
 	client->write_op = rados_create_write_op();
 	client->read_op = rados_create_read_op();
-	rados_aio_create_completion((void*)client, NULL, NULL, &client->aio_completion);
-	rados_aio_create_completion((void*)client, NULL, NULL, &client->aio_head_read_completion);
+	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_completion));
+	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_head_read_completion));
 	client->bucket_io_ctx = -1;
 	client->data_io_ctx = -1;
 
