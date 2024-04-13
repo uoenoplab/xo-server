@@ -586,7 +586,19 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	out_ctx->recv_protobuf_len = 0;
 	out_ctx->recv_protobuf_received = 0;
 
-	// TODO!!!: insert rule
+	uint8_t fake_server_mac[6];
+	memcpy(fake_server_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
+
+	// insert redirection rule: peer mac is fake server mac
+	ret = apply_redirection(migration_info->peer_addr, migration_info->self_addr,
+				migration_info->peer_port, migration_info->self_port,
+				migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
+				migration_info->peer_port, migration_info->self_port, false, true);
+
+//	// remove blocking
+//	ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+//				migration_info->peer_port, migration_info->self_port);
+//	assert(ret == 0);
 	printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d insert redir rule\n",
 		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
 
@@ -854,8 +866,13 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 	// build response proto_buf
 	SocketSerialize migration_info_resp = SOCKET_SERIALIZE__INIT;
 	migration_info_resp.msg_type = HANDOFF_DONE;
+
 	migration_info_resp.self_addr = migration_info->self_addr;
 	migration_info_resp.peer_addr = migration_info->peer_addr;
+
+	// encode self mac in response for orginal server to perform redirection
+	memcpy(&(migration_info_resp.peer_mac), my_mac, sizeof(uint8_t) * 6);
+
 	migration_info_resp.self_port = migration_info->self_port;
 	migration_info_resp.peer_port = migration_info->peer_port;
 

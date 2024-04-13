@@ -44,7 +44,7 @@ void send_client_data(struct http_client *client)
 		}
 
 		client->data_payload_sent += ret;
-		//printf("writev fd=%d called %ld/%ld %ld/%ld\n", client->fd, client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
+		printf("writev fd=%d called %ld/%ld %ld/%ld\n", client->fd, client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
 	}
 
 	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
@@ -307,12 +307,12 @@ static int on_headers_complete_cb(llhttp_t* parser)
 			int acting_primary_osd_id = -1;
 			ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &acting_primary_osd_id);
 			assert(ret == 0);
-			printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
 #ifdef USE_MIGRATION
 			if (get_my_osd_id() != acting_primary_osd_id) {
 				client->to_migrate = acting_primary_osd_id;
 				return 0;
 			}
+			printf("/%s/%s in osd.%d to migrate %d\n", client->bucket_name, client->object_name, acting_primary_osd_id, client->to_migrate);
 #endif
 		}
 

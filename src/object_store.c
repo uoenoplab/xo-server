@@ -88,6 +88,7 @@ void aio_head_read_callback(rados_completion_t comp, void *arg) {
 			assert(ret == 0);
 		}
 		client->data_payload_size = client->object_size;
+		printf("sending response \n");
 		send_response(client);
 	}
 }
@@ -631,6 +632,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 		send_response(client);
 	}
 	else if (strlen(client->bucket_name) != 0 && strlen(client->object_name) != 0) {
+		printf("/%s/%s to return to migrate %d\n", client->bucket_name, client->object_name, client->to_migrate);
 #ifdef USE_MIGRATION
 		if (client->to_migrate != -1)
 			return 0;
