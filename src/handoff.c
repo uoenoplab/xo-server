@@ -158,6 +158,28 @@ static void handoff_out_serialize(struct http_client *client)
 	int epfd = client->epoll_fd;
 	struct tcp_info_sub info;
 
+	socklen_t slen;
+	struct sockaddr_in self_sin;
+	bzero(&self_sin, sizeof(self_sin));
+	self_sin.sin_family = AF_INET;
+	slen = sizeof(self_sin);
+	ret = getsockname(fd, (struct sockaddr *)&self_sin, &slen);
+	assert(ret == 0);
+
+	struct sockaddr_in peer_sin;
+	bzero(&peer_sin, sizeof(peer_sin));
+	peer_sin.sin_family = AF_INET;
+	slen = sizeof(peer_sin);
+	ret = getpeername(fd, (struct sockaddr *)&peer_sin, &slen);
+	assert(ret == 0);
+
+	// apply blocking
+	ret = apply_redirection_ebpf(peer_sin.sin_addr.s_addr, self_sin.sin_addr.s_addr,
+				peer_sin.sin_port, self_sin.sin_port,
+				peer_sin.sin_addr.s_addr, client->client_mac, self_sin.sin_addr.s_addr, my_mac,
+				peer_sin.sin_port, self_sin.sin_port, true);
+	assert(ret == 0);
+
 	ret = setsockopt(fd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
 	assert(ret == 0);
 
@@ -167,7 +189,7 @@ static void handoff_out_serialize(struct http_client *client)
 	assert(ret == 0);
 #endif /* WITH_KTLS */
 
-	socklen_t slen = sizeof(info);
+	slen = sizeof(info);
 	ret = getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &slen);
 	assert(ret == 0);
 	ret = info.tcpi_state == TCP_ESTABLISHED || info.tcpi_state == TCP_CLOSE_WAIT;
@@ -192,20 +214,6 @@ static void handoff_out_serialize(struct http_client *client)
 	struct tcp_repair_window window;
 	slen = sizeof(window);
 	ret = getsockopt(fd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &window, &slen);
-	assert(ret == 0);
-
-	struct sockaddr_in sin;
-	bzero(&sin, sizeof(sin));
-	sin.sin_family = AF_INET;
-	slen = sizeof(sin);
-	ret = getsockname(fd, (struct sockaddr *)&sin, &slen);
-	assert(ret == 0);
-
-	struct sockaddr_in sin2;
-	bzero(&sin2, sizeof(sin2));
-	sin2.sin_family = AF_INET;
-	slen = sizeof(sin2);
-	ret = getpeername(fd, (struct sockaddr *)&sin2, &slen);
 	assert(ret == 0);
 
 	const int qid_snd = TCP_SEND_QUEUE;
@@ -285,10 +293,10 @@ static void handoff_out_serialize(struct http_client *client)
 	migration_info.max_window = window.max_window;
 	migration_info.rev_wnd = window.rcv_wnd;
 	migration_info.rev_wup = window.rcv_wup;
-	migration_info.self_addr = sin.sin_addr.s_addr;
-	migration_info.self_port = sin.sin_port;
-	migration_info.peer_addr = sin2.sin_addr.s_addr;
-	migration_info.peer_port = sin2.sin_port;
+	migration_info.self_addr = self_sin.sin_addr.s_addr;
+	migration_info.self_port = self_sin.sin_port;
+	migration_info.peer_addr = peer_sin.sin_addr.s_addr;
+	migration_info.peer_port = peer_sin.sin_port;
 	migration_info.seq = seqno_send;
 	migration_info.ack = seqno_recv;
 	migration_info.sendq.len = sendq_len;
