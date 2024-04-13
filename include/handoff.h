@@ -47,21 +47,22 @@ struct handoff_out_queue {
     struct handoff_out_req* rear;
 };
 
+#define MAX_HANDOFF_OUT_RECONNECT 10
+
 struct handoff_out {
 	uint32_t epoll_data_u32;
 	int epoll_fd;
 	int fd;
         bool is_fd_in_epoll;
+        int reconnect_count;
         int osd_arr_index;
         int thread_id;  // just for print stuff
         struct handoff_out_queue *queue;
         // handoff out request currently sending out, deququed from queue
         struct http_client *client;
-        // receive buffer???
         uint8_t *recv_protobuf;
         uint32_t recv_protobuf_len;
         uint32_t recv_protobuf_received;
-        // uint8_t recv_buf[1024];
 };
 
 void handoff_out_connect(struct handoff_out *out_ctx);
