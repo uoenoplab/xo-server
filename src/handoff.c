@@ -596,9 +596,9 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 				migration_info->peer_port, migration_info->self_port, false, true);
 
 //	// remove blocking
-//	ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
-//				migration_info->peer_port, migration_info->self_port);
-//	assert(ret == 0);
+	ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+				migration_info->peer_port, migration_info->self_port);
+	assert(ret == 0);
 	printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d insert redir rule\n",
 		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
 

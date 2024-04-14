@@ -44,10 +44,11 @@ void send_client_data(struct http_client *client)
 		}
 
 		client->data_payload_sent += ret;
-		printf("writev fd=%d called %ld/%ld %ld/%ld\n", client->fd, client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
+		//printf("writev fd=%d called %ld/%ld %ld/%ld\n", client->fd, client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
 	}
 
 	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
+		reset_http_client(client);
 		struct epoll_event event = {};
 		event.data.ptr = client;
 		//event.data.u32 = client->epoll_data_u32;
@@ -272,8 +273,8 @@ void aio_commit_callback(rados_completion_t comp, void *arg) {
 
 static int on_reset_cb(llhttp_t *parser)
 {
-	struct http_client *client = (struct http_client*)parser->data;
-	reset_http_client(client);
+	//struct http_client *client = (struct http_client*)parser->data;
+	//reset_http_client(client);
 
 	return 0;
 }
