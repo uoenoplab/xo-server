@@ -12,13 +12,13 @@
 #include <linux/tls.h>
 #include <netinet/tcp.h>
 
-#include "proto/socket_serialize.pb-c.h"
-
 #include "handoff.h"
+
 #include "object_store.h"
 #include "http_client.h"
 #include "osd_mapping.h"
-#include "forward.h"
+
+#include "proto/socket_serialize.pb-c.h"
 
 /*
 
@@ -90,6 +90,26 @@ static struct handoff_out_queue* handoff_out_queue_create() {
 
 static int handoff_out_queue_is_empty(struct handoff_out_queue* queue) {
     return queue->front == NULL;
+}
+
+// Function to add an element to the queue
+static void handoff_out_enqueue_front(struct handoff_out_queue* queue, void *client)
+{
+    struct handoff_out_req* new_req = handoff_out_req_create(client);
+    if (!new_req) {
+        printf("Heap Overflow\n");
+        return;
+    }
+
+    // If queue is empty, then new node is front and rear both
+    if (queue->rear == NULL) {
+        queue->front = queue->rear = new_req;
+        return;
+    }
+
+    // Add the new node at the front of queue
+	new_req->next = queue->front;
+	queue->front = new_req;
 }
 
 // Function to add an element to the queue
@@ -280,6 +300,10 @@ static void handoff_out_serialize(struct http_client *client)
 	/* pack & send handoff msg */
 	SocketSerialize migration_info = SOCKET_SERIALIZE__INIT;
 	migration_info.msg_type = HANDOFF_REQUEST;
+	if (client->from_migrate != -1) {
+		migration_info.msg_type = HANDOFF_BACK_REQUEST;
+	}
+
 	//tcp variables setting up
 	migration_info.sendq_len = sendq_len;
 	migration_info.unsentq_len = unsentq_len;
@@ -296,6 +320,7 @@ static void handoff_out_serialize(struct http_client *client)
 	migration_info.self_addr = self_sin.sin_addr.s_addr;
 	migration_info.self_port = self_sin.sin_port;
 	migration_info.peer_addr = peer_sin.sin_addr.s_addr;
+	memcpy(&(migration_info.peer_mac), client->client_mac, sizeof(uint8_t) * 6);
 	migration_info.peer_port = peer_sin.sin_port;
 	migration_info.seq = seqno_send;
 	migration_info.ack = seqno_recv;
@@ -320,7 +345,7 @@ static void handoff_out_serialize(struct http_client *client)
 
 	migration_info.object_size = client->object_size;
 
-	memcpy(&(migration_info.peer_mac), client->client_mac, sizeof(uint8_t) * 6);
+	migration_info.acting_primary_osd_id = client->acting_primary_osd_id;
 
 	size_t proto_len = socket_serialize__get_packed_size(&migration_info);
 	uint32_t net_proto_len = htonl(proto_len);
@@ -422,22 +447,31 @@ void handoff_out_reconnect(struct handoff_out *out_ctx) {
 
  // if we don't have a connection yet before send migration request to other node, need to create new connection
 void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
-	struct handoff_out *out_ctx, int osd_arr_index, int thread_id)
+	struct handoff_out *out_ctx, int osd_arr_index, int thread_id, bool serialize, bool urgent)
 {
 	out_ctx->osd_arr_index = osd_arr_index;
 	out_ctx->thread_id = thread_id;
 
-	// serialize state, we don't delete client until handoff_out is complete
-	handoff_out_serialize(client);
-	printf("Thread %d HANDOFF_OUT serialized client on conn %d\n", thread_id, client->fd);
+	if (serialize) {
+		// serialize state, we don't delete client until handoff_out is complete
+		handoff_out_serialize(client);
+		printf("Thread %d HANDOFF_OUT serialized client on conn %d\n", thread_id, client->fd);
+	}
 
 	// enqueue this handoff request
 	if (!out_ctx->queue) {
 		out_ctx->queue = handoff_out_queue_create();
 	}
-	handoff_out_enqueue(out_ctx->queue, client);
-	printf("Thread %d HANDOFF_OUT enqueued migration work to osd id %d for s3 client conn %d\n",
+
+	if (urgent) {
+		handoff_out_enqueue_front(out_ctx->queue, client);
+		printf("Thread %d HANDOFF_OUT (front)enqueued migration work to osd id %d for s3 client conn %d\n",
 		thread_id, osd_ids[out_ctx->osd_arr_index], client->fd);
+	} else {
+		handoff_out_enqueue(out_ctx->queue, client);
+		printf("Thread %d HANDOFF_OUT enqueued migration work to osd id %d for s3 client conn %d\n",
+		thread_id, osd_ids[out_ctx->osd_arr_index], client->fd);
+	}
 
 	// we have a connected fd and it is in epoll, let the epoll to consume this new request
 	if (out_ctx->is_fd_in_epoll)
@@ -589,16 +623,24 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	uint8_t fake_server_mac[6];
 	memcpy(fake_server_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
 
-	// insert redirection rule: peer mac is fake server mac
-	ret = apply_redirection(migration_info->peer_addr, migration_info->self_addr,
-				migration_info->peer_port, migration_info->self_port,
-				migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
-				migration_info->peer_port, migration_info->self_port, false, true);
-
-//	// remove blocking
+	if (out_ctx->client->from_migrate == -1) {
+		// insert redirection rule: peer mac is fake server mac
+		ret = apply_redirection(migration_info->peer_addr, migration_info->self_addr,
+					migration_info->peer_port, migration_info->self_port,
+					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
+					migration_info->peer_port, migration_info->self_port, false, true);
+		assert(ret == 0);
+	} else {
+		// remove src IP modification
+		ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
+					migration_info->self_port, migration_info->peer_port);
+		assert(ret == 0);
+	}
+	// remove blocking
 	ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
 				migration_info->peer_port, migration_info->self_port);
 	assert(ret == 0);
+
 	printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d insert redir rule\n",
 		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
 
@@ -712,23 +754,19 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 			fprintf(stderr, "incorrect ktlsbuf length (%ld)", migration_info->ktlsbuf.len);
 			exit(EXIT_FAILURE);
 		}
-
 		struct tls12_crypto_info_aes_gcm_256 *crypto_info_send =
 			migration_info->ktlsbuf.data;
 		struct tls12_crypto_info_aes_gcm_256 *crypto_info_recv =
 			migration_info->ktlsbuf.data + sizeof(struct tls12_crypto_info_aes_gcm_256);
-
 		if (setsockopt(rfd, SOL_TCP, TCP_ULP, "tls", sizeof("tls")) < 0) {
 			fprintf(stderr, "set ULP tls fail (%s)\n", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
-
 		if (setsockopt(rfd, SOL_TLS, TLS_TX, crypto_info_send,
 						sizeof(*crypto_info_send)) < 0) {
 			fprintf(stderr, "Couldn't set TLS_TX option (%s)\n", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
-
 		if (setsockopt(rfd, SOL_TLS, TLS_RX, crypto_info_recv,
 						sizeof(*crypto_info_recv)) < 0) {
 			fprintf(stderr, "Couldn't set TLS_RX option (%s)\n", strerror(errno));
@@ -745,7 +783,10 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	client->method = migration_info->method;
 	client->bucket_io_ctx = in_ctx->bucket_io_ctx;
 	client->data_io_ctx = in_ctx->data_io_ctx;
-	client->from_migrate = true;
+	if (migration_info->msg_type == HANDOFF_REQUEST) {
+		client->from_migrate = osd_ids[in_ctx->osd_arr_index];
+	}
+	memcpy(client->client_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
 
 	if (migration_info->ktlsbuf.len) {
 		client->tls.is_ssl = true;
@@ -755,19 +796,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 		client->tls.is_ssl = false;
 	}
 
-	// Extract the MAC address from the reply
-	memcpy(client->client_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
-	printf("migration peer mac is ");
-	print_mac_address(client->client_mac);
-
 	printf("deserialized: %s\n", client->uri_str);
-
-	// apply src IP modification
-	ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
-				migration_info->self_port, migration_info->peer_port,
-				migration_info->self_addr, my_mac, migration_info->peer_addr, client->client_mac,
-				migration_info->self_port, migration_info->peer_port, false, false);
-	assert(ret == 0);
 
 	/* quiting repair mode */
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
@@ -780,8 +809,8 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	assert(ret == 0);
 
 	// check if HTTP GET
-        char datetime_str[256];
-        get_datetime_str(datetime_str, 256);
+	char datetime_str[256];
+	get_datetime_str(datetime_str, 256);
 
 	init_object_get_request(client);
 	complete_get_request(client, datetime_str);
@@ -844,14 +873,6 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 
 	SocketSerialize *migration_info = socket_serialize__unpack(NULL,
 		in_ctx->recv_protobuf_len, in_ctx->recv_protobuf);
-	if (migration_info == NULL) {
-		fprintf(stderr, "%s: unable to unpack recv protobuf\n", __func__);
-		exit(EXIT_FAILURE);
-	}
-	if (migration_info->msg_type != HANDOFF_REQUEST) {
-		fprintf(stderr, "%s: can only handle HANDOFF_REQUEST msg\n", __func__);
-		exit(EXIT_FAILURE);
-	}
 
 	if (in_ctx->recv_protobuf != NULL) {
 		free(in_ctx->recv_protobuf);
@@ -860,8 +881,50 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 	in_ctx->recv_protobuf_len = 0;
 	in_ctx->recv_protobuf_received = 0;
 
-	// do deserialize
-	handoff_in_deserialize(in_ctx, migration_info);
+	if (migration_info->msg_type == HANDOFF_REQUEST) {
+		handoff_in_deserialize(in_ctx, migration_info);
+		// apply src IP modification
+		ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
+					migration_info->self_port, migration_info->peer_port,
+					migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
+					migration_info->self_port, migration_info->peer_port, false, false);
+		assert(ret == 0);
+	} else if (migration_info->msg_type == HANDOFF_BACK_REQUEST) {
+		if (migration_info->acting_primary_osd_id == get_my_osd_id()) {
+			handoff_in_deserialize(in_ctx, migration_info);
+		} else {
+			// **special serialize for re-handoff**
+			// apply blocking
+			ret = apply_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+					migration_info->peer_port, migration_info->self_port,
+					migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac, get_my_osd_addr().sin_addr.s_addr, my_mac,
+					migration_info->peer_port, migration_info->self_port, true);
+			assert(ret == 0);
+
+			struct http_client *client = (struct http_client*)calloc(1, sizeof(struct http_client));
+			client->to_migrate = migration_info->acting_primary_osd_id;
+			client->acting_primary_osd_id = migration_info->acting_primary_osd_id;
+
+			SocketSerialize migration_info_handoff_again = *migration_info;
+			migration_info_handoff_again.self_addr = get_my_osd_addr().sin_addr.s_addr;
+
+			int proto_len = socket_serialize__get_packed_size(&migration_info_handoff_again);
+			uint32_t net_proto_len = htonl(proto_len);
+			client->proto_buf = malloc(sizeof(net_proto_len) + proto_len);
+			socket_serialize__pack(&migration_info_handoff_again, client->proto_buf + sizeof(net_proto_len));
+			// add length of proto_buf at the begin
+			memcpy(client->proto_buf, &net_proto_len, sizeof(net_proto_len));
+			client->proto_buf_sent = 0;
+			client->proto_buf_len = sizeof(net_proto_len) + proto_len;
+		}
+		// we are safe to remove previous redir to fake server there since we
+		// either have a working fd or blocked incoming packets
+		remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+			migration_info->peer_port, migration_info->self_port);
+	} else {
+		fprintf(stderr, "%s: can only handle HANDOFF_REQUEST or HANDOFF_BACK_REQUEST msg\n", __func__);
+		exit(EXIT_FAILURE);
+	}
 
 	// build response proto_buf
 	SocketSerialize migration_info_resp = SOCKET_SERIALIZE__INIT;
@@ -900,7 +963,7 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 	}
 }
 
-void handoff_in_send(struct handoff_in *in_ctx) {
+void handoff_in_send(struct handoff_in *in_ctx, struct http_client **client_to_handoff_again) {
 	int ret = send(in_ctx->fd, in_ctx->send_protobuf + in_ctx->send_protobuf_sent,
 		in_ctx->send_protobuf_len - in_ctx->send_protobuf_sent, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
@@ -914,20 +977,25 @@ void handoff_in_send(struct handoff_in *in_ctx) {
 
 	in_ctx->send_protobuf_sent += ret;
 
+	if (in_ctx->send_protobuf_sent < in_ctx->send_protobuf_len)
+		return;
+
 	// send done
-	if (in_ctx->send_protobuf_sent == in_ctx->send_protobuf_len) {
-		if (in_ctx->send_protobuf != NULL) {
-			free(in_ctx->send_protobuf);
-			in_ctx->send_protobuf = NULL;
-		}
-		in_ctx->send_protobuf_len = 0;
-		in_ctx->send_protobuf_sent = 0;
-		struct epoll_event event = {0};
-		event.data.ptr = in_ctx;
-		event.events = EPOLLIN;
-		if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_MOD, in_ctx->fd, &event) == -1) {
-			perror("epoll_ctl");
-			exit(EXIT_FAILURE);
-		}
+	if (in_ctx->send_protobuf != NULL) {
+		free(in_ctx->send_protobuf);
+		in_ctx->send_protobuf = NULL;
+	}
+	in_ctx->send_protobuf_len = 0;
+	in_ctx->send_protobuf_sent = 0;
+	if (in_ctx->client_to_handoff_again) {
+		*client_to_handoff_again = in_ctx->client_to_handoff_again;
+		in_ctx->client_to_handoff_again = NULL;
+	}
+	struct epoll_event event = {0};
+	event.data.ptr = in_ctx;
+	event.events = EPOLLIN;
+	if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_MOD, in_ctx->fd, &event) == -1) {
+		perror("epoll_ctl");
+		exit(EXIT_FAILURE);
 	}
 }
