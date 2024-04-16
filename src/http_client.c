@@ -11,6 +11,8 @@
 #include "osd_mapping.h"
 #include "handoff.h"
 
+bool enable_migration = false;
+
 void send_client_data(struct http_client *client)
 {
 	struct iovec iov[2];
@@ -303,18 +305,18 @@ static int on_headers_complete_cb(llhttp_t* parser)
 	}
 	else if (client->method == HTTP_GET) {
 		/* retrieve obj from OSD */
-		if (strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
+		if (enable_migration && !(client->from_migrate) && strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
 			/* check if we want to migrate */
 			int acting_primary_osd_id = -1;
 			ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &acting_primary_osd_id);
 			assert(ret == 0);
-#ifdef USE_MIGRATION
+			//printf("/%s/%s in osd.%d to migrate %d\n", client->bucket_name, client->object_name, acting_primary_osd_id, client->to_migrate);
 			if (get_my_osd_id() != acting_primary_osd_id) {
 				client->to_migrate = acting_primary_osd_id;
+#ifdef USE_MIGRATION
 				return 0;
-			}
-			printf("/%s/%s in osd.%d to migrate %d\n", client->bucket_name, client->object_name, acting_primary_osd_id, client->to_migrate);
 #endif
+			}
 		}
 
 		init_object_get_request(client);

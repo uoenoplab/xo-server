@@ -25,6 +25,9 @@
 enum http_expect { CONTINUE, NONE };
 
 extern const size_t BUF_SIZE;
+#ifdef USE_MIGRATION
+extern bool enable_migration;
+#endif
 
 typedef struct ssl_st SSL;
 typedef struct bio_st BIO;

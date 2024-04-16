@@ -346,17 +346,19 @@ static void *conn_wait(void *arg)
 	}
 
 #ifdef USE_MIGRATION
-	// Add handoff_in eventfd into epoll
-	memset(&event, 0 , sizeof(event));
-	handoff_in_ctxs[num_osds - 1].epoll_data_u32 = HANDOFF_IN_EVENT;
-	handoff_in_ctxs[num_osds - 1].epoll_fd = epoll_fd;
-	handoff_in_ctxs[num_osds - 1].fd = param->handoff_in_eventfd;
-	event.events = EPOLLIN;
-	event.data.ptr = &handoff_in_ctxs[num_osds - 1];
-	printf("Thread %d HANDOFF_IN regiester eventfd %d\n", param->thread_id, param->handoff_in_eventfd);
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_eventfd, &event) == -1) {
-		perror("epoll_ctl: efd");
-		exit(EXIT_FAILURE);
+	if (enable_migration) {
+		// Add handoff_in eventfd into epoll
+		memset(&event, 0 , sizeof(event));
+		handoff_in_ctxs[num_osds - 1].epoll_data_u32 = HANDOFF_IN_EVENT;
+		handoff_in_ctxs[num_osds - 1].epoll_fd = epoll_fd;
+		handoff_in_ctxs[num_osds - 1].fd = param->handoff_in_eventfd;
+		event.events = EPOLLIN;
+		event.data.ptr = &handoff_in_ctxs[num_osds - 1];
+		printf("Thread %d HANDOFF_IN regiester eventfd %d\n", param->thread_id, param->handoff_in_eventfd);
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_eventfd, &event) == -1) {
+			perror("epoll_ctl: efd");
+			exit(EXIT_FAILURE);
+		}
 	}
 #endif
 
@@ -436,7 +438,7 @@ static void *conn_wait(void *arg)
 					ret = handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
 #ifdef USE_MIGRATION
 					// check if ret okay, connection could be closed
-					if (ret == 0 && c->to_migrate != -1) {
+					if (enable_migration && ret == 0 && c->to_migrate != -1) {
 						printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
 							param->thread_id, c->fd, c->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
@@ -450,7 +452,7 @@ static void *conn_wait(void *arg)
 				}
 			}
 #ifdef USE_MIGRATION
-			else if (epoll_data_u32 == HANDOFF_IN_EVENT) {
+			else if (enable_migration && epoll_data_u32 == HANDOFF_IN_EVENT) {
 				struct handoff_in *in_ctx = (struct handoff_in *)events[i].data.ptr;
 				in_ctx->data_io_ctx = data_io_ctx;
 				in_ctx->bucket_io_ctx = bucket_io_ctx;
@@ -510,7 +512,7 @@ static void *conn_wait(void *arg)
 					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",
 						param->thread_id, in_ctx->fd, events[i].events);
 				}
-			} else if (epoll_data_u32 == HANDOFF_OUT_EVENT) {
+			} else if (enable_migration && epoll_data_u32 == HANDOFF_OUT_EVENT) {
 				struct handoff_out *out_ctx = (struct handoff_out *)events[i].data.ptr;
 				if ((events[i].events & EPOLLERR) ||
 					(events[i].events & EPOLLHUP) ||
@@ -830,10 +832,23 @@ int main(int argc, char *argv[])
 	struct sigaction sa;
 	int err;
 
+#if USE_MIGRATION
+	if (argc != 4) {
+		fprintf(stderr, "Usage: %s [interface] [threads] [enable migration (0/1)]\n", argv[0]);
+#else
 	if (argc != 3) {
 		fprintf(stderr, "Usage: %s [interface] [threads]\n", argv[0]);
+#endif
 		exit(1);
 	}
+
+#if USE_MIGRATION
+	if (atoi(argv[3]) == 1)
+		enable_migration = true;
+	else
+		enable_migration = false;
+	printf("Connection migration: %s\n", enable_migration ? "enabled" : "disabled");
+#endif
 
 	// initialize libforward-tc
 	err = init_forward(argv[1], "ingress", "1:");
@@ -884,16 +899,21 @@ int main(int argc, char *argv[])
 	}
 
 #ifdef USE_MIGRATION
-	int handoff_listen_fd = handoff_server_listen();
-	if (handoff_listen_fd < 0) {
-		fprintf(stderr, "%s: cannot init handoff server: %s\n", argv[0], strerror(-err));
-		exit(EXIT_FAILURE);
-	}
+	int handoff_listen_fd = -1;
+	int handoff_epoll_fd = -1;
 
-	int handoff_epoll_fd = handoff_server_create_epoll(handoff_listen_fd);
-	if (handoff_epoll_fd < 0) {
-		fprintf(stderr, "%s: cannot init handoff : %s\n", argv[0], strerror(-err));
-		exit(EXIT_FAILURE);
+	if (enable_migration) {
+		handoff_listen_fd = handoff_server_listen();
+		if (handoff_listen_fd < 0) {
+			fprintf(stderr, "%s: cannot init handoff server: %s\n", argv[0], strerror(-err));
+			exit(EXIT_FAILURE);
+		}
+
+		handoff_epoll_fd = handoff_server_create_epoll(handoff_listen_fd);
+		if (handoff_epoll_fd < 0) {
+			fprintf(stderr, "%s: cannot init handoff : %s\n", argv[0], strerror(-err));
+			exit(EXIT_FAILURE);
+		}
 	}
 #endif
 
@@ -937,10 +957,11 @@ int main(int argc, char *argv[])
 	}
 
 #ifdef USE_MIGRATION
-	handoff_server_loop(handoff_epoll_fd, handoff_listen_fd, param, nproc);
-#else
-	pause();
+	if (enable_migration)
+		handoff_server_loop(handoff_epoll_fd, handoff_listen_fd, param, nproc);
+	else
 #endif
+		pause();
 	printf("terminating\n");
 
 	for (int i = 0; i < nproc; i++) {
@@ -964,6 +985,8 @@ int main(int argc, char *argv[])
 		if (osd_addr_strs[i] != NULL) free(osd_addr_strs[i]);
 	}
 
+	fini_forward();
+	fini_forward_ebpf();
 	printf("Server terminated!\n");
 
 	return 0;
