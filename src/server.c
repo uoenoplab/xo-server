@@ -309,7 +309,8 @@ static void *conn_wait(void *arg)
 	int thread_id = param->thread_id;
 	rados_t cluster = param->cluster;
 
-	char client_data_buffer[BUF_SIZE];
+	//char client_data_buffer[BUF_SIZE];
+	char *client_data_buffer = malloc(BUF_SIZE);
 
 	int ret;
 	int epoll_fd, event_count;
@@ -506,7 +507,10 @@ static void *conn_wait(void *arg)
 				} else if (events[i].events & EPOLLOUT) {
 					struct http_client *client_to_handoff_again = NULL;
 					handoff_in_send(in_ctx, &client_to_handoff_again);
+					printf("client_to_handoff_again %p\n", client_to_handoff_again);
 					if (client_to_handoff_again) {
+						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
+							param->thread_id, client_to_handoff_again->to_migrate);	
 						int osd_arr_index = get_arr_index_from_osd_id(client_to_handoff_again->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id, false, true);

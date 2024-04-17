@@ -884,12 +884,16 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 	if (migration_info->msg_type == HANDOFF_REQUEST) {
 		handoff_in_deserialize(in_ctx, migration_info);
 		// apply src IP modification
+		printf("peer_addr %X peer_port %X\n", migration_info->peer_addr, migration_info->peer_port);
 		ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port,
 					migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
 					migration_info->self_port, migration_info->peer_port, false, false);
 		assert(ret == 0);
+		printf("apply src IP modification done\n");
 	} else if (migration_info->msg_type == HANDOFF_BACK_REQUEST) {
+		printf("HANDOFF_BACK_REQUEST migration_info->acting_primary_osd_id %d get_my_osd_id() %d\n",
+			migration_info->acting_primary_osd_id, get_my_osd_id());
 		if (migration_info->acting_primary_osd_id == get_my_osd_id()) {
 			handoff_in_deserialize(in_ctx, migration_info);
 		} else {
@@ -901,11 +905,13 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 					migration_info->peer_port, migration_info->self_port, true);
 			assert(ret == 0);
 
-			struct http_client *client = (struct http_client*)calloc(1, sizeof(struct http_client));
+			struct http_client *client = create_http_client(-1, -1);
 			client->to_migrate = migration_info->acting_primary_osd_id;
 			client->acting_primary_osd_id = migration_info->acting_primary_osd_id;
 
 			SocketSerialize migration_info_handoff_again = *migration_info;
+			
+			migration_info_handoff_again.msg_type = HANDOFF_REQUEST;
 			migration_info_handoff_again.self_addr = get_my_osd_addr().sin_addr.s_addr;
 
 			int proto_len = socket_serialize__get_packed_size(&migration_info_handoff_again);
@@ -916,6 +922,8 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 			memcpy(client->proto_buf, &net_proto_len, sizeof(net_proto_len));
 			client->proto_buf_sent = 0;
 			client->proto_buf_len = sizeof(net_proto_len) + proto_len;
+
+			in_ctx->client_to_handoff_again = client;
 		}
 		// we are safe to remove previous redir to fake server there since we
 		// either have a working fd or blocked incoming packets
