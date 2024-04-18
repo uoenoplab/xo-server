@@ -264,12 +264,12 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 	if (bytes_received <= 0) {
 		// Client closed the connection or an error occurred
 		if (bytes_received == 0) {
-			printf("Thread %d: Client disconnected: %d\n", thread_id, client->fd);
+			fprintf(stderr, "Thread %d: Client disconnected: %d\n", thread_id, client->fd);
 		} else if (errno == EAGAIN && client->tls.is_ssl && client->tls.is_ktls_set) {
 			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
 			return 1;
 		} else {
-			perror("recv");
+			fprintf(stderr, "Thread %d: Client disconnected: %d (%s)\n", thread_id, client->fd, strerror(errno));
 		}
 
 		// Remove the client socket from the epoll event list
@@ -839,6 +839,8 @@ int main(int argc, char *argv[])
 	struct sigaction sa;
 	int err;
 
+	signal(SIGPIPE, SIG_IGN);
+
 #if USE_MIGRATION
 	if (argc != 4) {
 		fprintf(stderr, "Usage: %s [interface] [threads] [enable migration (0/1)]\n", argv[0]);
@@ -855,12 +857,12 @@ int main(int argc, char *argv[])
 	else
 		enable_migration = false;
 	printf("Connection migration: %s\n", enable_migration ? "enabled" : "disabled");
-#endif
 
 	// initialize libforward-tc
 	err = init_forward(argv[1], "ingress", "1:");
 	assert(err >= 0);
 
+#endif
 	err = tls_init();
 	if (err < 0) {
 		fprintf(stderr, "%s: cannot init openssl\n", __func__);
@@ -930,7 +932,8 @@ int main(int argc, char *argv[])
 
 	sigemptyset(&sigmask);
 	sigaddset(&sigmask, SIGINT);
-
+	sigaddset(&sigmask, SIGPIPE);
+	
 	pthread_attr_init(&attr);
 
 	sa.sa_handler = handleCtrlC;

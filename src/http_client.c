@@ -30,8 +30,8 @@ void send_client_data(struct http_client *client)
 	}
 
 	ssize_t ret = writev(client->fd, iov, iov_count);
-	if (ret != EAGAIN) {
-		// response is not sent
+	if (ret > 0) {
+		// response is not complete sent
 		if (client->response_sent != client->response_size) {
 			size_t response_left = client->response_size - client->response_sent;
 			if (ret > response_left) {
@@ -46,7 +46,12 @@ void send_client_data(struct http_client *client)
 
 		client->data_payload_sent += ret;
 		//printf("writev fd=%d called %ld/%ld %ld/%ld\n", client->fd, client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
-	}
+	} else {
+		if (ret == 0 || (ret == -1 && errno != EAGAIN)) {
+			fprintf(stderr, "writev returned %d on fd %d (%s)\n", ret, client->fd, strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+	} 
 
 	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
 		reset_http_client(client);
