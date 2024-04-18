@@ -8,8 +8,9 @@
 
 #include "http_client.h"
 #include "object_store.h"
-#include "conn_migration.h"
 #include "osd_mapping.h"
+
+bool enable_migration = false;
 
 void send_client_data(struct http_client *client)
 {
@@ -48,8 +49,10 @@ void send_client_data(struct http_client *client)
 	}
 
 	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
+		reset_http_client(client);
 		struct epoll_event event = {};
 		event.data.ptr = client;
+		//event.data.u32 = client->epoll_data_u32;
 		event.events = EPOLLIN;
 		epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 	}
@@ -65,7 +68,7 @@ static int on_header_field_cb(llhttp_t *parser, const char *at, size_t length)
 		client->header_value_parsed = 0;
 	}
 
-	assert(client->header_field_parsed + length < MAX_LENGTH_SIZE);
+	assert(client->header_field_parsed + length < MAX_FIELDS_SIZE);
 	memcpy(&(client->header_fields[client->num_fields][client->header_field_parsed]), at, length);
 	client->header_field_parsed += length;
 	return 0;
@@ -255,6 +258,7 @@ void send_response(struct http_client *client)
 {
 	struct epoll_event event = {};
 	event.data.ptr = client;
+	//event.data.u32 = client->epoll_data_u32;
 	event.events = EPOLLOUT;
 	int ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 	assert(ret == 0);
@@ -270,8 +274,8 @@ void aio_commit_callback(rados_completion_t comp, void *arg) {
 
 static int on_reset_cb(llhttp_t *parser)
 {
-	struct http_client *client = (struct http_client*)parser->data;
-	reset_http_client(client);
+	//struct http_client *client = (struct http_client*)parser->data;
+	//reset_http_client(client);
 
 	return 0;
 }
@@ -300,18 +304,27 @@ static int on_headers_complete_cb(llhttp_t* parser)
 	}
 	else if (client->method == HTTP_GET) {
 		/* retrieve obj from OSD */
-		if (strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
+		//if (enable_migration && (client->from_migrate == -1) && strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
+		if (enable_migration && strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
 			/* check if we want to migrate */
-			int acting_primary_osd_id = -1;
-			ret = rados_get_object_osd_position(*(client->data_io_ctx), client->object_name, &acting_primary_osd_id);
+			client->acting_primary_osd_id = -1;
+			ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &client->acting_primary_osd_id);
 			assert(ret == 0);
-			if (my_osd_id == acting_primary_osd_id) {
-				printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
-				conn_migration(client, acting_primary_osd_id);
+			printf("/%s/%s in osd.%d to migrate %d\n", client->bucket_name, client->object_name, client->acting_primary_osd_id, client->to_migrate);
+			if (get_my_osd_id() != client->acting_primary_osd_id) {
+				// we have to migrate the client back to where it origins first
+				// before migrate to actual primary osd_id
+				if (client->from_migrate == -1) {
+					client->to_migrate = client->acting_primary_osd_id;
+				} else {
+					client->to_migrate = client->from_migrate;
+				}
 			}
+
+#ifdef USE_MIGRATION
+			if (client->to_migrate != -1) return 0;
+#endif
 		}
-
-
 		init_object_get_request(client);
 	}
 	else if (client->method == HTTP_POST) {
@@ -361,6 +374,14 @@ void reset_http_client(struct http_client *client)
 //		if (client->header_fields[i]) free(client->header_fields[i]);
 //		if (client->header_values[i]) free(client->header_values[i]);
 //	}
+
+	client->to_migrate = -1;
+	client->acting_primary_osd_id = -1;
+	client->proto_buf_sent = 0;
+	client->proto_buf_len = 0;
+	if (client->proto_buf != NULL) {
+		free(client->proto_buf);
+	}
 
 	client->num_fields = 0;
 	client->expect = NONE;
@@ -432,21 +453,23 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	reset_http_client(client);
 
 	client->epoll_fd = epoll_fd;
+	client->epoll_data_u32 = 0;
 	client->fd = fd;
 	client->parser.data = client;
 
 //	client->header_fields = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 //	client->header_values = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 
-	client->bucket_io_ctx = NULL;
-	client->data_io_ctx = NULL;
-
-	client->prval = 0;
 	client->write_op = rados_create_write_op();
 	client->read_op = rados_create_read_op();
-
-	rados_aio_create_completion((void*)client, aio_ack_callback, aio_commit_callback, &(client->aio_completion));
+	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_completion));
 	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_head_read_completion));
+	client->bucket_io_ctx = -1;
+	client->data_io_ctx = -1;
+
+	client->prval = 0;
+
+	client->from_migrate = -1;
 
 	client->tls.is_ssl = true;
 	client->tls.is_handshake_done = false;
@@ -474,9 +497,8 @@ void free_http_client(struct http_client *client)
 
 	rados_aio_release(client->aio_head_read_completion);
 	rados_aio_release(client->aio_completion);
-
-	rados_release_read_op(client->read_op);
 	rados_release_write_op(client->write_op);
+	rados_release_write_op(client->read_op);
 
 	free(client);
 }

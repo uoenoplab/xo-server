@@ -75,7 +75,7 @@ void aio_head_read_callback(rados_completion_t comp, void *arg) {
 		if (etag) free(etag);
 		if (last_modified_datetime_str) free(last_modified_datetime_str);
 
-		if (client->object_size > full_object_size) {
+		if (client->object_size < full_object_size) {
 			size_t tail_size = full_object_size - client->object_size;
 			size_t bytes_read = client->object_size;
 			client->object_size = full_object_size;
@@ -84,15 +84,11 @@ void aio_head_read_callback(rados_completion_t comp, void *arg) {
 			assert(client->data_payload != NULL);
 			client->data_payload_size = client->object_size;
 
-			rados_aio_release(client->aio_completion);
-			rados_aio_create_completion((void*)client, aio_ack_callback, aio_commit_callback, &(client->aio_completion));
-			ret = rados_aio_read(*(client->data_io_ctx), client->aio_completion, client->object_name, client->data_payload + bytes_read, tail_size, bytes_read);
+			ret = rados_read(client->data_io_ctx, client->object_name, client->data_payload + bytes_read, tail_size, bytes_read);
 			assert(ret == 0);
 		}
-		else {
-			client->data_payload_size = client->object_size;
-			send_response(client);
-		}
+		client->data_payload_size = client->object_size;
+		send_response(client);
 	}
 }
 
@@ -103,24 +99,18 @@ void init_object_get_request(struct http_client *client)
 	int ret;
 
 	if (strlen(client->bucket_name) != 0 && strlen(client->object_name) != 0) {
-		/* retrieve obj from OSD */
-		if (strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
-			/* check if we want to migrate */
-			int acting_primary_osd_id = -1;
-			ret = rados_get_object_osd_position(*(client->data_io_ctx), client->object_name, &acting_primary_osd_id);
-			assert(ret == 0);
-			if (my_osd_id == acting_primary_osd_id) {
-				printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
-				conn_migration(client, acting_primary_osd_id);
-			}
-		}
+		///* retrieve obj from OSD */
+		//if (strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
+		//	/* check if we want to migrate */
+		//	int acting_primary_osd_id = -1;
+		//	ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &acting_primary_osd_id);
+		//	assert(ret == 0);
+		//	printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
+		//}
 
 		//client->data_payload = malloc(FIRST_READ_SIZE);
 		client->data_payload = realloc(client->data_payload, FIRST_READ_SIZE);
 		assert(client->data_payload != NULL);
-
-		rados_aio_release(client->aio_head_read_completion);
-		rados_aio_create_completion((void*)client, aio_head_read_callback, NULL, &(client->aio_head_read_completion));
 
 		rados_release_read_op(client->read_op);
 		client->read_op = rados_create_read_op();
@@ -128,8 +118,16 @@ void init_object_get_request(struct http_client *client)
 		rados_read_op_assert_exists(client->read_op);
 		rados_read_op_getxattrs(client->read_op, &(client->iter), &(client->prval));
 		rados_read_op_read(client->read_op, 0, FIRST_READ_SIZE, client->data_payload, &(client->object_size), &prval);
-		ret = rados_aio_read_op_operate(client->read_op, *(client->data_io_ctx), client->aio_head_read_completion, client->object_name, LIBRADOS_OPERATION_NOFLAG);
+
+#ifdef ASYNC_READ
+		rados_aio_release(client->aio_head_read_completion);
+		rados_aio_create_completion((void*)client, aio_head_read_callback, NULL, &(client->aio_head_read_completion));
+		ret = rados_aio_read_op_operate(client->read_op, client->data_io_ctx, client->aio_head_read_completion, client->object_name, LIBRADOS_OPERATION_NOFLAG);
 		assert(ret == 0);
+#else
+		ret = rados_read_op_operate(client->read_op, client->data_io_ctx, client->object_name, LIBRADOS_OPERATION_NOFLAG);
+		assert(ret == 0);
+#endif
 	}
 }
 
@@ -145,7 +143,7 @@ void complete_head_request(struct http_client *client, const char *datetime_str)
 	// if scopped to bucket
 	if (strlen(client->bucket_name) != 0 && strlen(client->object_name) == 0) {
 		char buf;
-		ret = rados_read(*(client->bucket_io_ctx), client->bucket_name, &buf, 0, 0);
+		ret = rados_read(client->bucket_io_ctx, client->bucket_name, &buf, 0, 0);
 		if (ret != 0) {
 			fprintf(stderr, "Bucket %s does not exist\n", client->bucket_name);
 			client->response_size = snprintf(NULL, 0, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str) + 1;
@@ -203,10 +201,10 @@ void complete_post_request(struct http_client *client, const char *datetime_str)
 						keys[i] = strdup((const char*)content);
 						keys_len[i] = strlen((const char*)content);
 
-						//int ret = rados_remove(*(client->data_io_ctx), (const char*)content);
+						//int ret = rados_remove(client->data_io_ctx, (const char*)content);
 						write_op = rados_create_write_op();
 						rados_write_op_remove(write_op);
-						ret = rados_write_op_operate(write_op, *(client->data_io_ctx), content, NULL, 0);
+						ret = rados_write_op_operate(write_op, client->data_io_ctx, content, NULL, 0);
 						//printf("ret=%d %ld/%ld deleting %s %ld\n", ret, i, num_objects, keys[i], keys_len[i]);
 						assert(ret == 0);
 						rados_release_write_op(write_op);
@@ -222,7 +220,7 @@ void complete_post_request(struct http_client *client, const char *datetime_str)
 
 			write_op = rados_create_write_op();
 			rados_write_op_omap_rm_keys2(write_op, (const char**)keys, keys_len, i);
-			ret = rados_write_op_operate(write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, LIBRADOS_OPERATION_NOFLAG);
+			ret = rados_write_op_operate(write_op, client->bucket_io_ctx, client->bucket_name, NULL, LIBRADOS_OPERATION_NOFLAG);
 			assert(ret == 0);
 			rados_release_write_op(write_op);
 
@@ -279,11 +277,11 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 
 		rados_read_op_t read_op = rados_create_read_op();
 		rados_read_op_omap_get_vals2(read_op, NULL, NULL, 1, &iter, &pmore, &prval);
-		rados_read_op_operate(read_op, *(client->bucket_io_ctx), client->bucket_name, 0);
+		rados_read_op_operate(read_op, client->bucket_io_ctx, client->bucket_name, 0);
 		rados_omap_get_next2(iter, &object_name, &metadata, &object_name_len, &metadata_len);
 
 		if (object_name == NULL) {
-			ret = rados_remove(*(client->bucket_io_ctx), client->bucket_name);
+			ret = rados_remove(client->bucket_io_ctx, client->bucket_name);
 			if (ret) { perror("rados_remove"); }
 
 			client->response_size = snprintf(NULL, 0, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
@@ -341,8 +339,8 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 		// delete object
 		rados_write_op_t write_op = rados_create_write_op();
 		rados_write_op_remove(write_op);
-		//ret = rados_remove(*(client->data_io_ctx), client->object_name);
-		ret = rados_write_op_operate2(write_op, *(client->data_io_ctx), client->object_name, NULL, 0);
+		//ret = rados_remove(client->data_io_ctx, client->object_name);
+		ret = rados_write_op_operate2(write_op, client->data_io_ctx, client->object_name, NULL, 0);
 		assert(ret == 0);
 		rados_release_write_op(write_op);
 		printf("removed %s\n", client->object_name);
@@ -351,7 +349,7 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 		const size_t keys_len = strlen(client->object_name);
 		write_op = rados_create_write_op();
 		rados_write_op_omap_rm_keys2(write_op, &keys_name, &keys_len, 1);
-		ret = rados_write_op_operate2(write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
+		ret = rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
 		assert(ret == 0);
 		rados_release_write_op(write_op);
 		printf("removed %s from %s\n", client->object_name, client->bucket_name);
@@ -377,7 +375,7 @@ void complete_put_request(struct http_client *client, const char *datetime_str)
 		rados_release_write_op(client->write_op);
 		client->write_op = rados_create_write_op();
 		rados_write_op_create(client->write_op, LIBRADOS_CREATE_EXCLUSIVE, NULL);
-		ret = rados_write_op_operate2(client->write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
+		ret = rados_write_op_operate2(client->write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
 		if (ret) {
 			// bucket already exist
 			client->response_size = snprintf(NULL, 0, "HTTP/1.1 400 Bad Request\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
@@ -407,13 +405,6 @@ void complete_put_request(struct http_client *client, const char *datetime_str)
 		const char *keys = client->object_name;
 		const char *vals = metadata;
 
-		/* register object to bucket */
-		rados_write_op_t write_op = rados_create_write_op();
-		rados_write_op_omap_set2(write_op, &keys, &vals, &key_lens, &val_lens, 1);
-		ret = rados_write_op_operate2(write_op, *(client->bucket_io_ctx), client->bucket_name, NULL, 0);
-		assert(ret == 0);
-		rados_release_write_op(write_op);
-
 		/* the write op has already been prepared since init put req, DO NOT RELEASE */
 		rados_write_op_setxattr(client->write_op, "etag", md5_hash, strlen(md5_hash) + 1);
 		rados_write_op_setxattr(client->write_op, "last_modified", datetime_str, strlen(datetime_str) + 1);
@@ -425,11 +416,28 @@ void complete_put_request(struct http_client *client, const char *datetime_str)
 		snprintf(client->response, client->response_size, "%s\r\nEtag: \"%s\"\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, md5_hash, AMZ_REQUEST_ID, datetime_str);
 		client->response_size--;
 
-		/* store data and register callback */
+		/* store data */
+#ifdef ASYNC_WRITE
 		rados_aio_release(client->aio_completion);
-		rados_aio_create_completion((void*)client, aio_ack_callback, aio_commit_callback, &(client->aio_completion));
-		ret = rados_aio_write_op_operate2(client->write_op, *(client->data_io_ctx), client->aio_completion, client->object_name, NULL, 0);
+		rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_completion));
+		ret = rados_aio_write_op_operate2(client->write_op, client->data_io_ctx, client->aio_completion, client->object_name, NULL, 0);
 		assert(ret == 0);
+#else
+		ret = rados_write_op_operate2(client->write_op, client->data_io_ctx, client->object_name, NULL, 0);
+		assert(ret == 0);
+#endif
+
+		/* register object to bucket */
+		rados_write_op_t write_op = rados_create_write_op();
+		rados_write_op_omap_set2(write_op, &keys, &vals, &key_lens, &val_lens, 1);
+		ret = rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
+		assert(ret == 0);
+		rados_release_write_op(write_op);
+
+#ifdef ASYNC_WRITE
+		rados_aio_wait_for_complete(client->aio_completion);
+#endif
+		aio_commit_callback(client->aio_completion, (void*)client);
 	}
 }
 
@@ -459,7 +467,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 		rados_read_op_t read_op = rados_create_read_op();
 		rados_read_op_assert_exists(read_op);
 		rados_read_op_omap_get_vals2(read_op, prefix, continue_from, 5000, &iter, &pmore, &prval);
-		ret = rados_read_op_operate(read_op, *(client->bucket_io_ctx), client->bucket_name, 0);
+		ret = rados_read_op_operate(read_op, client->bucket_io_ctx, client->bucket_name, 0);
 
 		if (ret != 0 || prval != 0) {
 			// 404
@@ -623,6 +631,16 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 		send_response(client);
 	}
 	else if (strlen(client->bucket_name) != 0 && strlen(client->object_name) != 0) {
+		//printf("/%s/%s to return to migrate %d\n", client->bucket_name, client->object_name, client->to_migrate);
+#ifdef USE_MIGRATION
+		if (enable_migration && client->to_migrate != -1)
+			return 0;
+#endif
+#ifdef ASYNC_READ
+		rados_aio_wait_for_complete(client->aio_head_read_completion);
+#else
+		aio_head_read_callback(client->aio_head_read_completion, (void*)client);
+#endif
 	}
 }
 

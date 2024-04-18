@@ -9,16 +9,17 @@
 #include <asm/byteorder.h>
 
 #include "tls.h"
+#include "util.h"
 
-static void hexdump(const char *title, void *buf, size_t len)
-{
-  printf("%s (%lu bytes) :\n", title, len);
-  for (int i = 0; i < len; i++) {
-    printf("%02hhX ", ((uint8_t *)buf)[i]);
-    if (i % 16 == 15) printf("\n");
-  }
-  printf("\n");
-}
+//static void __attribute_maybe_unused__ hexdump(const char *title, void *buf, size_t len)
+//{
+//  printf("%s (%lu bytes) :\n", title, len);
+//  for (size_t i = 0; i < len; i++) {
+//    printf("%02hhX ", ((uint8_t *)buf)[i]);
+//    if (i % 16 == 15) printf("\n");
+//  }
+//  printf("\n");
+//}
 
 static unsigned char hex_char_to_int(char c)
 {
@@ -42,10 +43,10 @@ int hkdf_tls13_sha384_expand(EVP_KDF_CTX *kctx,
     OSSL_PARAM params[8], *p = params;
 
     *p++ = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, SN_sha384, strlen(SN_sha384));
-    *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, (void*)in, in_len);
+    *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, (void *)in, in_len);
     *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, "", 0);
     *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_PREFIX, "tls13 ", strlen("tls13 "));
-    *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_LABEL, label, strlen(label));
+    *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_LABEL, (void *)label, strlen(label));
     *p++ = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_DATA, "", 0);
     *p++ = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE, "EXPAND_ONLY", strlen("EXPAND_ONLY"));
     *p = OSSL_PARAM_construct_end();
@@ -127,7 +128,7 @@ static inline void print_ssl_error(const char *msg)
 	BIO_free(bio);
 }
 
-static inline int count_tls_records(const uint8_t *buffer, size_t buf_size) {
+static inline int count_tls_records(const char *buffer, size_t buf_size) {
     // Check if the buffer starts with a TLS header
     if (buf_size < 5 || buffer[0] != 0x17 || buffer[1] != 0x03 || buffer[2] != 0x03) {
         printf("Error: Buffer does not start with a TLS header.\n");
@@ -372,11 +373,11 @@ static inline void reset_client_send_buffer(struct http_client *client)
 
 static int tls_make_ktls(struct http_client *client, uint64_t recv_rec_seqnum) {
 	struct tls12_crypto_info_aes_gcm_256 crypto_info_send = {0};
-	struct tls12_crypto_info_aes_gcm_256 crypto_info_read = {0};
+	struct tls12_crypto_info_aes_gcm_256 crypto_info_recv = {0};
 	crypto_info_send.info.version = TLS_1_3_VERSION;
-	crypto_info_read.info.version = TLS_1_3_VERSION;
+	crypto_info_recv.info.version = TLS_1_3_VERSION;
 	crypto_info_send.info.cipher_type = TLS_CIPHER_AES_GCM_256;
-	crypto_info_read.info.cipher_type = TLS_CIPHER_AES_GCM_256;
+	crypto_info_recv.info.cipher_type = TLS_CIPHER_AES_GCM_256;
 
 	unsigned char iv_buffer[TLS_CIPHER_AES_GCM_256_IV_SIZE + TLS_CIPHER_AES_GCM_256_SALT_SIZE];
 
@@ -394,12 +395,12 @@ static int tls_make_ktls(struct http_client *client, uint64_t recv_rec_seqnum) {
 	}
 
 	hkdf_tls13_sha384_expand(kctx, client->tls.client_traffic_secret, sizeof(client->tls.client_traffic_secret),
-		crypto_info_read.key, sizeof(crypto_info_read.key), "key");
+		crypto_info_recv.key, sizeof(crypto_info_recv.key), "key");
 	hkdf_tls13_sha384_expand(kctx, client->tls.client_traffic_secret, sizeof(client->tls.client_traffic_secret),
 		iv_buffer, sizeof(iv_buffer), "iv");
-	memcpy(crypto_info_read.iv, iv_buffer + 4, TLS_CIPHER_AES_GCM_256_IV_SIZE);
-  	memcpy(crypto_info_read.salt, iv_buffer, TLS_CIPHER_AES_GCM_256_SALT_SIZE);
-	*((__be64 *)crypto_info_read.rec_seq) = __be64_to_cpu(recv_rec_seqnum);
+	memcpy(crypto_info_recv.iv, iv_buffer + 4, TLS_CIPHER_AES_GCM_256_IV_SIZE);
+  	memcpy(crypto_info_recv.salt, iv_buffer, TLS_CIPHER_AES_GCM_256_SALT_SIZE);
+	*((__be64 *)crypto_info_recv.rec_seq) = __be64_to_cpu(recv_rec_seqnum);
 
 	hkdf_tls13_sha384_expand(kctx, client->tls.server_traffic_secret, sizeof(client->tls.server_traffic_secret),
 		crypto_info_send.key, sizeof(crypto_info_send.key), "key");
@@ -420,9 +421,9 @@ static int tls_make_ktls(struct http_client *client, uint64_t recv_rec_seqnum) {
 		return -1;
 	}
 
-	if (setsockopt(client->fd, SOL_TLS, TLS_RX, &crypto_info_read,
-					sizeof(crypto_info_read)) < 0) {
-		fprintf(stderr, "Couldn't set TLS_TX option (%s)\n", strerror(errno));
+	if (setsockopt(client->fd, SOL_TLS, TLS_RX, &crypto_info_recv,
+					sizeof(crypto_info_recv)) < 0) {
+		fprintf(stderr, "Couldn't set TLS_RX option (%s)\n", strerror(errno));
 		return -1;
 	}
 
@@ -485,7 +486,7 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 		}
 
 		// scan number of tls record headers from pending bytes
-		uint64_t recv_rec_seqnum = count_tls_records(client_data_buffer + bytes_received - bytes_pending, bytes_pending);
+		int recv_rec_seqnum = count_tls_records(client_data_buffer + bytes_received - bytes_pending, bytes_pending);
 		if (recv_rec_seqnum == -1) {
 			perror("Unable to handle the case tls record arrived "
 				"partically before set ktls");
@@ -523,7 +524,7 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 		}
 
 		// now we are safe to set ktls
-		if (tls_make_ktls(client, recv_rec_seqnum) == -1) {
+		if (tls_make_ktls(client, (uint64_t) recv_rec_seqnum) == -1) {
 			fprintf(stderr, "tls_make_ktls failed\n");
 			return -1;
 		}

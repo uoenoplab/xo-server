@@ -54,3 +54,6 @@ core.*
 vgcore.*
 
 build
+
+proto/socket_serialize.pb-c.h
+proto/socket_serialize.pb-c.c

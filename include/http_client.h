@@ -24,7 +24,10 @@
 
 enum http_expect { CONTINUE, NONE };
 
-extern size_t BUF_SIZE;
+extern const size_t BUF_SIZE;
+#ifdef USE_MIGRATION
+extern bool enable_migration;
+#endif
 
 typedef struct ssl_st SSL;
 typedef struct bio_st BIO;
@@ -42,17 +45,16 @@ static char *HTTP_CONTINUE_HDR = (char *)"HTTP/1.1 100 CONTINUE\r\n\r\n";
 static char *AMZ_REQUEST_ID = (char*)"tx000009a75d393f1564ec2-0065202454-3771-default";
 
 struct http_client {
-	int epoll_fd;
+	uint32_t epoll_data_u32;
+	// always set epoll.data.u32 to this value
 	int fd;
+	int epoll_fd;
 
 	int prval;
 	rados_xattrs_iter_t iter;
-
-	rados_write_op_t write_op;
+	rados_completion_t comp;
 	rados_read_op_t read_op;
-
-	rados_completion_t aio_completion;
-	rados_completion_t aio_head_read_completion;
+	rados_read_op_t write_op;
 
 	ssize_t data_payload_sent;
 	ssize_t data_payload_size;
@@ -86,8 +88,11 @@ struct http_client {
 	//char **header_values;
 	size_t num_fields;
 
+	pthread_mutex_t mutex;
 	rados_ioctx_t *bucket_io_ctx;
 	rados_ioctx_t *data_io_ctx;
+	rados_completion_t aio_completion;
+	rados_completion_t aio_head_read_completion;
 
 	size_t object_size;
 	size_t object_offset;
@@ -123,6 +128,16 @@ struct http_client {
 		unsigned char client_traffic_secret[48];
 		unsigned char server_traffic_secret[48];
 	} tls;
+
+	// handoff
+	int to_migrate;
+	int from_migrate;
+	int acting_primary_osd_id;
+	uint8_t client_mac[6];
+
+	uint8_t *proto_buf;
+	uint32_t proto_buf_len; // include the uint32 header size
+	uint32_t proto_buf_sent;
 };
 
 struct http_client *create_http_client(int epoll_fd, int fd);
@@ -139,9 +154,9 @@ void free_http_client(struct http_client *client);
 //static int on_message_complete_cb(llhttp_t* parser);
 //static int on_reset_cb(llhttp_t *parser);
 
-void send_client_data(struct http_client *client);
-void send_response(struct http_client *client);
 void aio_ack_callback(rados_completion_t comp, void *arg);
 void aio_commit_callback(rados_completion_t comp, void *arg);
+void send_client_data(struct http_client *client);
+void send_response(struct http_client *client);
 
 #endif
