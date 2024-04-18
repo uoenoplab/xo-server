@@ -156,7 +156,7 @@ void free_http_client(struct http_client *client);
 
 void aio_ack_callback(rados_completion_t comp, void *arg);
 void aio_commit_callback(rados_completion_t comp, void *arg);
-void send_client_data(struct http_client *client);
+int send_client_data(struct http_client *client);
 void send_response(struct http_client *client);
 
 #endif

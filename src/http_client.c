@@ -12,7 +12,7 @@
 
 bool enable_migration = false;
 
-void send_client_data(struct http_client *client)
+int send_client_data(struct http_client *client)
 {
 	struct iovec iov[2];
 	size_t iov_count = 0;
@@ -49,9 +49,9 @@ void send_client_data(struct http_client *client)
 	} else {
 		if (ret == 0 || (ret == -1 && errno != EAGAIN)) {
 			fprintf(stderr, "writev returned %d on fd %d (%s)\n", ret, client->fd, strerror(errno));
-			exit(EXIT_FAILURE);
+			return -1;
 		}
-	} 
+	}
 
 	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
 		reset_http_client(client);
@@ -61,6 +61,8 @@ void send_client_data(struct http_client *client)
 		event.events = EPOLLIN;
 		epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 	}
+
+	return 0;
 }
 
 static int on_header_field_cb(llhttp_t *parser, const char *at, size_t length)

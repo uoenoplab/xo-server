@@ -17,6 +17,7 @@
 #include "object_store.h"
 #include "http_client.h"
 #include "osd_mapping.h"
+#include "tls.h"
 
 #include "proto/socket_serialize.pb-c.h"
 
@@ -171,6 +172,7 @@ restore_queue(int fd, int q, const uint8_t *buf, uint32_t len, int need_repair)
 	return 0;
 }
 
+
 static void handoff_out_serialize(struct http_client *client)
 {
 	int ret = -1;
@@ -202,12 +204,6 @@ static void handoff_out_serialize(struct http_client *client)
 
 	ret = setsockopt(fd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
 	assert(ret == 0);
-
-// TODO: ktls export
-#ifdef WITH_KTLS
-	tls_unmake_ktls(fd_state[fd].tls_context, fd);
-	assert(ret == 0);
-#endif /* WITH_KTLS */
 
 	slen = sizeof(info);
 	ret = getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &slen);
@@ -445,13 +441,13 @@ void handoff_out_reconnect(struct handoff_out *out_ctx) {
 	}
 }
 
- // if we don't have a connection yet before send migration request to other node, need to create new connection
 void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
 	struct handoff_out *out_ctx, int osd_arr_index, int thread_id, bool serialize, bool urgent)
 {
 	out_ctx->osd_arr_index = osd_arr_index;
 	out_ctx->thread_id = thread_id;
 
+	// we only need seriously serialize for normal handoff request
 	if (serialize) {
 		// serialize state, we don't delete client until handoff_out is complete
 		handoff_out_serialize(client);
@@ -624,6 +620,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	memcpy(fake_server_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
 
 	if (out_ctx->client->from_migrate == -1) {
+		// normal handoff
 		// insert redirection rule: peer mac is fake server mac
 		ret = apply_redirection(migration_info->peer_addr, migration_info->self_addr,
 					migration_info->peer_port, migration_info->self_port,
@@ -631,19 +628,25 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 					migration_info->peer_port, migration_info->self_port, false, true);
 		assert(ret == 0);
 	} else {
+		// handoff back and handoff reset
 		// remove src IP modification
 		ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port);
 		assert(ret == 0);
 	}
-	// remove blocking
-	ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
-				migration_info->peer_port, migration_info->self_port);
-	assert(ret == 0);
+
+	// we don't need this for handoff_reset where fd already closed
+	if (out_ctx->client->fd != -1) {
+		// remove blocking
+		ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+					migration_info->peer_port, migration_info->self_port);
+		assert(ret == 0);
+	}
 
 	printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d insert redir rule\n",
 		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
 
+	tls_free_client(client);
 	free_http_client(out_ctx->client);
 	out_ctx->client = NULL;
 	socket_serialize__free_unpacked(migration_info, NULL);
@@ -910,7 +913,7 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 			client->acting_primary_osd_id = migration_info->acting_primary_osd_id;
 
 			SocketSerialize migration_info_handoff_again = *migration_info;
-			
+
 			migration_info_handoff_again.msg_type = HANDOFF_REQUEST;
 			migration_info_handoff_again.self_addr = get_my_osd_addr().sin_addr.s_addr;
 
@@ -929,6 +932,10 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 		// either have a working fd or blocked incoming packets
 		remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 			migration_info->peer_port, migration_info->self_port);
+	} else if (migration_info->msg_type == HANDOFF_RESET_REQUEST) {
+		// delete redir rule...
+		remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+		migration_info->peer_port, migration_info->self_port);
 	} else {
 		fprintf(stderr, "%s: can only handle HANDOFF_REQUEST or HANDOFF_BACK_REQUEST msg\n", __func__);
 		exit(EXIT_FAILURE);

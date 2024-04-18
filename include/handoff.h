@@ -25,6 +25,7 @@
 enum {
         HANDOFF_REQUEST,
         HANDOFF_BACK_REQUEST,
+        HANDOFF_RESET_REQUEST,
         HANDOFF_DONE
 };
 

@@ -181,14 +181,61 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	}
 }
 
-void handle_client_disconnect(int epoll_fd, struct http_client *client)
+void handle_client_disconnect(int epoll_fd, struct http_client *client,
+	int thread_id, struct handoff_out *handoff_out_ctxs)
 {
 	int fd = client->fd;
-	// Remove the client socket from the epoll event list
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL) == -1) {
-		perror("epoll_ctl");
+
+#ifdef USE_MIGRATION
+	// **special serialize for reset-handoff**
+	if (client->from_migrate != -1) {
+		client->to_migrate = client->from_migrate;
+
+		socklen_t slen;
+		struct sockaddr_in self_sin;
+		bzero(&self_sin, sizeof(self_sin));
+		self_sin.sin_family = AF_INET;
+		slen = sizeof(self_sin);
+		ret = getsockname(fd, (struct sockaddr *)&self_sin, &slen);
+		assert(ret == 0);
+
+		struct sockaddr_in peer_sin;
+		bzero(&peer_sin, sizeof(peer_sin));
+		peer_sin.sin_family = AF_INET;
+		slen = sizeof(peer_sin);
+		int ret = getpeername(fd, (struct sockaddr *)&peer_sin, &slen);
+		assert(ret == 0);
+
+		// build reset proto_buf
+		SocketSerialize migration_info_reset = SOCKET_SERIALIZE__INIT;
+		migration_info_reset.msg_type = HANDOFF_RESET_REQUEST;
+
+		migration_info_reset.self_addr = self_sin.sin_addr.s_addr;
+		migration_info_reset.self_port = self_sin.sin_port;
+		migration_info_reset.peer_addr = peer_sin.sin_addr.s_addr;
+		migration_info_reset.peer_port = peer_sin.sin_port;
+
+		int proto_len = socket_serialize__get_packed_size(&migration_info_reset);
+		uint32_t net_proto_len = htonl(proto_len);
+		client->proto_buf = malloc(sizeof(net_proto_len) + proto_len);
+		socket_serialize__pack(&migration_info_reset, client->proto_buf + sizeof(net_proto_len));
+		// add length of proto_buf at the begin
+		memcpy(client->proto_buf, &net_proto_len, sizeof(net_proto_len));
+		client->proto_buf_sent = 0;
+		client->proto_buf_len = sizeof(net_proto_len) + proto_len;
+
+		int osd_arr_index = get_arr_index_from_osd_id(client->from_migrate);
+		handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client,
+			&handoff_out_ctxs[osd_arr_index], osd_arr_index, thread_id, false, true);
+
+		close(fd); // close will detele fd from epoll anyway
+		client->fd = -1;
+		// we don't free up client since we still need it for handoff_reset
+		return;
 	}
-	close(fd);
+#endif
+
+	close(fd); // close will detele fd from epoll anyway
 	tls_free_client(client);
 	free_http_client(client);
 }
@@ -267,14 +314,13 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 			fprintf(stderr, "Thread %d: Client disconnected: %d\n", thread_id, client->fd);
 		} else if (errno == EAGAIN && client->tls.is_ssl && client->tls.is_ktls_set) {
 			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
-			return 1;
+			return 0;
 		} else {
 			fprintf(stderr, "Thread %d: Client disconnected: %d (%s)\n", thread_id, client->fd, strerror(errno));
 		}
 
 		// Remove the client socket from the epoll event list
-		handle_client_disconnect(epoll_fd, client); // Handle client disconnection
-		return 1;
+		return -1;
 	}
 
 	if (client->tls.is_ssl){
@@ -283,7 +329,7 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 			fprintf(stderr, "%s: handle_client_data_ssl returned %ld\n", __func__, bytes_received);
 			exit(EXIT_FAILURE);
 		}
-		if (bytes_received == 0) return 1;
+		if (bytes_received == 0) return 0;
 	}
 
 	client->bucket_io_ctx = bucket_io_ctx;
@@ -430,13 +476,19 @@ static void *conn_wait(void *arg)
 					handle_new_connection(epoll_fd, param->ifname, server_fd, thread_id);
 				}
 				else if (events[i].events & EPOLLOUT) {
-					send_client_data(c);
+					ret = send_client_data(c);
+					if (ret == -1) {
+						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
+					}
 				}
 				else if (events[i].events & EPOLLIN) {
 					ret = handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
+					if (ret == -1) {
+						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
+					}
 #ifdef USE_MIGRATION
 					// check if ret okay, connection could be closed
-					if (enable_migration && ret == 0 && c->to_migrate != -1) {
+					if (ret != -1 && enable_migration && c->to_migrate != -1) {
 						printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
 							param->thread_id, c->fd, c->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
@@ -510,7 +562,7 @@ static void *conn_wait(void *arg)
 					printf("client_to_handoff_again %p\n", client_to_handoff_again);
 					if (client_to_handoff_again) {
 						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
-							param->thread_id, client_to_handoff_again->to_migrate);	
+							param->thread_id, client_to_handoff_again->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(client_to_handoff_again->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id, false, true);
@@ -933,7 +985,7 @@ int main(int argc, char *argv[])
 	sigemptyset(&sigmask);
 	sigaddset(&sigmask, SIGINT);
 	sigaddset(&sigmask, SIGPIPE);
-	
+
 	pthread_attr_init(&attr);
 
 	sa.sa_handler = handleCtrlC;
