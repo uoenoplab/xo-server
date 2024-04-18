@@ -50,8 +50,6 @@ struct http_client {
 	int fd;
 	int epoll_fd;
 
-	uint8_t client_mac[6];
-
 	int prval;
 	rados_xattrs_iter_t iter;
 	rados_completion_t comp;
@@ -133,7 +131,9 @@ struct http_client {
 
 	// handoff
 	int to_migrate;
-	bool from_migrate;
+	int from_migrate;
+	int acting_primary_osd_id;
+	uint8_t client_mac[6];
 
 	uint8_t *proto_buf;
 	uint32_t proto_buf_len; // include the uint32 header size

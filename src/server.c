@@ -19,7 +19,6 @@
 #include <ini.h>
 #include <netinet/tcp.h>
 #include <sys/eventfd.h>
-
 #include <net/if_arp.h>
 
 #include "http_client.h"
@@ -27,8 +26,6 @@
 #include "osd_mapping.h"
 
 #include "handoff.h"
-
-#include "forward.h"
 
 #define S3_HTTP_PORT 8080
 #define HANDOFF_CTRL_PORT 8081
@@ -312,7 +309,8 @@ static void *conn_wait(void *arg)
 	int thread_id = param->thread_id;
 	rados_t cluster = param->cluster;
 
-	char client_data_buffer[BUF_SIZE];
+	//char client_data_buffer[BUF_SIZE];
+	char *client_data_buffer = malloc(BUF_SIZE);
 
 	int ret;
 	int epoll_fd, event_count;
@@ -443,7 +441,7 @@ static void *conn_wait(void *arg)
 							param->thread_id, c->fd, c->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
-							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
+							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id, true, false);
 					}
 #endif
 				} else {
@@ -507,7 +505,16 @@ static void *conn_wait(void *arg)
 				} else if (events[i].events & EPOLLIN) {
 					handoff_in_recv(in_ctx);
 				} else if (events[i].events & EPOLLOUT) {
-					handoff_in_send(in_ctx);
+					struct http_client *client_to_handoff_again = NULL;
+					handoff_in_send(in_ctx, &client_to_handoff_again);
+					printf("client_to_handoff_again %p\n", client_to_handoff_again);
+					if (client_to_handoff_again) {
+						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
+							param->thread_id, client_to_handoff_again->to_migrate);	
+						int osd_arr_index = get_arr_index_from_osd_id(client_to_handoff_again->to_migrate);
+						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
+							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id, false, true);
+					}
 				} else {
 					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",
 						param->thread_id, in_ctx->fd, events[i].events);

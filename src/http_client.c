@@ -9,7 +9,6 @@
 #include "http_client.h"
 #include "object_store.h"
 #include "osd_mapping.h"
-#include "handoff.h"
 
 bool enable_migration = false;
 
@@ -305,20 +304,27 @@ static int on_headers_complete_cb(llhttp_t* parser)
 	}
 	else if (client->method == HTTP_GET) {
 		/* retrieve obj from OSD */
-		if (enable_migration && !(client->from_migrate) && strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
+		//if (enable_migration && (client->from_migrate == -1) && strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
+		if (enable_migration && strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
 			/* check if we want to migrate */
-			int acting_primary_osd_id = -1;
-			ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &acting_primary_osd_id);
+			client->acting_primary_osd_id = -1;
+			ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &client->acting_primary_osd_id);
 			assert(ret == 0);
-			//printf("/%s/%s in osd.%d to migrate %d\n", client->bucket_name, client->object_name, acting_primary_osd_id, client->to_migrate);
-			if (get_my_osd_id() != acting_primary_osd_id) {
-				client->to_migrate = acting_primary_osd_id;
-#ifdef USE_MIGRATION
-				return 0;
-#endif
+			printf("/%s/%s in osd.%d to migrate %d\n", client->bucket_name, client->object_name, client->acting_primary_osd_id, client->to_migrate);
+			if (get_my_osd_id() != client->acting_primary_osd_id) {
+				// we have to migrate the client back to where it origins first
+				// before migrate to actual primary osd_id
+				if (client->from_migrate == -1) {
+					client->to_migrate = client->acting_primary_osd_id;
+				} else {
+					client->to_migrate = client->from_migrate;
+				}
 			}
-		}
 
+#ifdef USE_MIGRATION
+			if (client->to_migrate != -1) return 0;
+#endif
+		}
 		init_object_get_request(client);
 	}
 	else if (client->method == HTTP_POST) {
@@ -370,6 +376,7 @@ void reset_http_client(struct http_client *client)
 //	}
 
 	client->to_migrate = -1;
+	client->acting_primary_osd_id = -1;
 	client->proto_buf_sent = 0;
 	client->proto_buf_len = 0;
 	if (client->proto_buf != NULL) {
@@ -462,7 +469,7 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 
 	client->prval = 0;
 
-	client->from_migrate = false;
+	client->from_migrate = -1;
 
 	client->tls.is_ssl = true;
 	client->tls.is_handshake_done = false;

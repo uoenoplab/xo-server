@@ -33,4 +33,5 @@ message socket_serialize {
 	string object_name = 27;
 	string uri_str = 28;
 	int64 object_size = 29;
+        int32 acting_primary_osd_id = 30;
 }
