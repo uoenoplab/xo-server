@@ -71,6 +71,8 @@ struct handoff_out {
         uint32_t recv_protobuf_received;
 };
 
+void handoff_out_serialize_reset(struct http_client *client);
+
 void handoff_out_connect(struct handoff_out *out_ctx);
 void handoff_out_reconnect(struct handoff_out *out_ctx);
 void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,

@@ -187,50 +187,15 @@ void handle_client_disconnect(int epoll_fd, struct http_client *client,
 	int fd = client->fd;
 
 #ifdef USE_MIGRATION
-	// **special serialize for reset-handoff**
+	// we don't free up client since we still need it for handoff_reset
 	if (client->from_migrate != -1) {
-		client->to_migrate = client->from_migrate;
-
-		socklen_t slen;
-		struct sockaddr_in self_sin;
-		bzero(&self_sin, sizeof(self_sin));
-		self_sin.sin_family = AF_INET;
-		slen = sizeof(self_sin);
-		ret = getsockname(fd, (struct sockaddr *)&self_sin, &slen);
-		assert(ret == 0);
-
-		struct sockaddr_in peer_sin;
-		bzero(&peer_sin, sizeof(peer_sin));
-		peer_sin.sin_family = AF_INET;
-		slen = sizeof(peer_sin);
-		int ret = getpeername(fd, (struct sockaddr *)&peer_sin, &slen);
-		assert(ret == 0);
-
-		// build reset proto_buf
-		SocketSerialize migration_info_reset = SOCKET_SERIALIZE__INIT;
-		migration_info_reset.msg_type = HANDOFF_RESET_REQUEST;
-
-		migration_info_reset.self_addr = self_sin.sin_addr.s_addr;
-		migration_info_reset.self_port = self_sin.sin_port;
-		migration_info_reset.peer_addr = peer_sin.sin_addr.s_addr;
-		migration_info_reset.peer_port = peer_sin.sin_port;
-
-		int proto_len = socket_serialize__get_packed_size(&migration_info_reset);
-		uint32_t net_proto_len = htonl(proto_len);
-		client->proto_buf = malloc(sizeof(net_proto_len) + proto_len);
-		socket_serialize__pack(&migration_info_reset, client->proto_buf + sizeof(net_proto_len));
-		// add length of proto_buf at the begin
-		memcpy(client->proto_buf, &net_proto_len, sizeof(net_proto_len));
-		client->proto_buf_sent = 0;
-		client->proto_buf_len = sizeof(net_proto_len) + proto_len;
+		handoff_out_serialize_reset(client);
 
 		int osd_arr_index = get_arr_index_from_osd_id(client->from_migrate);
 		handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client,
 			&handoff_out_ctxs[osd_arr_index], osd_arr_index, thread_id, false, true);
 
 		close(fd); // close will detele fd from epoll anyway
-		client->fd = -1;
-		// we don't free up client since we still need it for handoff_reset
 		return;
 	}
 #endif

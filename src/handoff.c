@@ -172,6 +172,48 @@ restore_queue(int fd, int q, const uint8_t *buf, uint32_t len, int need_repair)
 	return 0;
 }
 
+// **special serialize for reset-handoff**
+void handoff_out_serialize_reset(struct http_client *client)
+{
+	int ret;
+	socklen_t slen;
+	int fd = client->fd;
+
+	struct sockaddr_in self_sin;
+	bzero(&self_sin, sizeof(self_sin));
+	self_sin.sin_family = AF_INET;
+	slen = sizeof(self_sin);
+	ret = getsockname(fd, (struct sockaddr *)&self_sin, &slen);
+	assert(ret == 0);
+
+	struct sockaddr_in peer_sin;
+	bzero(&peer_sin, sizeof(peer_sin));
+	peer_sin.sin_family = AF_INET;
+	slen = sizeof(peer_sin);
+	ret = getpeername(fd, (struct sockaddr *)&peer_sin, &slen);
+	assert(ret == 0);
+
+	// build reset proto_buf
+	SocketSerialize migration_info_reset = SOCKET_SERIALIZE__INIT;
+	migration_info_reset.msg_type = HANDOFF_RESET_REQUEST;
+
+	migration_info_reset.self_addr = self_sin.sin_addr.s_addr;
+	migration_info_reset.self_port = self_sin.sin_port;
+	migration_info_reset.peer_addr = peer_sin.sin_addr.s_addr;
+	migration_info_reset.peer_port = peer_sin.sin_port;
+
+	int proto_len = socket_serialize__get_packed_size(&migration_info_reset);
+	uint32_t net_proto_len = htonl(proto_len);
+	client->proto_buf = malloc(sizeof(net_proto_len) + proto_len);
+	socket_serialize__pack(&migration_info_reset, client->proto_buf + sizeof(net_proto_len));
+	// add length of proto_buf at the begin
+	memcpy(client->proto_buf, &net_proto_len, sizeof(net_proto_len));
+	client->proto_buf_sent = 0;
+	client->proto_buf_len = sizeof(net_proto_len) + proto_len;
+
+	client->to_migrate = client->from_migrate;
+	client->fd = -1;
+}
 
 static void handoff_out_serialize(struct http_client *client)
 {
@@ -646,7 +688,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d insert redir rule\n",
 		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
 
-	tls_free_client(client);
+	tls_free_client(out_ctx->client);
 	free_http_client(out_ctx->client);
 	out_ctx->client = NULL;
 	socket_serialize__free_unpacked(migration_info, NULL);
