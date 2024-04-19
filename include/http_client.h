@@ -135,6 +135,9 @@ struct http_client {
 	int acting_primary_osd_id;
 	uint8_t client_mac[6];
 
+	uint32_t client_addr;
+	uint16_t client_port;
+
 	uint8_t *proto_buf;
 	uint32_t proto_buf_len; // include the uint32 header size
 	uint32_t proto_buf_sent;

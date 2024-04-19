@@ -186,21 +186,20 @@ void handoff_out_serialize_reset(struct http_client *client)
 	ret = getsockname(fd, (struct sockaddr *)&self_sin, &slen);
 	assert(ret == 0);
 
-	struct sockaddr_in peer_sin;
-	bzero(&peer_sin, sizeof(peer_sin));
-	peer_sin.sin_family = AF_INET;
-	slen = sizeof(peer_sin);
-	ret = getpeername(fd, (struct sockaddr *)&peer_sin, &slen);
-	assert(ret == 0);
-
 	// build reset proto_buf
 	SocketSerialize migration_info_reset = SOCKET_SERIALIZE__INIT;
 	migration_info_reset.msg_type = HANDOFF_RESET_REQUEST;
 
+
 	migration_info_reset.self_addr = self_sin.sin_addr.s_addr;
 	migration_info_reset.self_port = self_sin.sin_port;
-	migration_info_reset.peer_addr = peer_sin.sin_addr.s_addr;
-	migration_info_reset.peer_port = peer_sin.sin_port;
+	migration_info_reset.peer_addr = client->client_addr;
+	migration_info_reset.peer_port = client->client_port;
+
+	printf("%s: peer_addr %X peer_port %X self_addr %X self_port %X\n",
+		__func__,
+		migration_info_reset.peer_addr, migration_info_reset.peer_port,
+		migration_info_reset.self_addr, migration_info_reset.self_port);
 
 	int proto_len = socket_serialize__get_packed_size(&migration_info_reset);
 	uint32_t net_proto_len = htonl(proto_len);
@@ -230,18 +229,11 @@ static void handoff_out_serialize(struct http_client *client)
 	ret = getsockname(fd, (struct sockaddr *)&self_sin, &slen);
 	assert(ret == 0);
 
-	struct sockaddr_in peer_sin;
-	bzero(&peer_sin, sizeof(peer_sin));
-	peer_sin.sin_family = AF_INET;
-	slen = sizeof(peer_sin);
-	ret = getpeername(fd, (struct sockaddr *)&peer_sin, &slen);
-	assert(ret == 0);
-
 	// apply blocking
-	ret = apply_redirection_ebpf(peer_sin.sin_addr.s_addr, self_sin.sin_addr.s_addr,
-				peer_sin.sin_port, self_sin.sin_port,
-				peer_sin.sin_addr.s_addr, client->client_mac, self_sin.sin_addr.s_addr, my_mac,
-				peer_sin.sin_port, self_sin.sin_port, true);
+	ret = apply_redirection_ebpf(client->client_addr, self_sin.sin_addr.s_addr,
+				client->client_port, self_sin.sin_port,
+				client->client_addr, client->client_mac, self_sin.sin_addr.s_addr, my_mac,
+				client->client_port, self_sin.sin_port, true);
 	assert(ret == 0);
 
 	ret = setsockopt(fd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
@@ -357,9 +349,9 @@ static void handoff_out_serialize(struct http_client *client)
 	migration_info.rev_wup = window.rcv_wup;
 	migration_info.self_addr = self_sin.sin_addr.s_addr;
 	migration_info.self_port = self_sin.sin_port;
-	migration_info.peer_addr = peer_sin.sin_addr.s_addr;
+	migration_info.peer_addr = client->client_addr;
 	memcpy(&(migration_info.peer_mac), client->client_mac, sizeof(uint8_t) * 6);
-	migration_info.peer_port = peer_sin.sin_port;
+	migration_info.peer_port = client->client_port;
 	migration_info.seq = seqno_send;
 	migration_info.ack = seqno_recv;
 	migration_info.sendq.len = sendq_len;
@@ -672,6 +664,12 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	} else {
 		// handoff back and handoff reset
 		// remove src IP modification
+		printf("%s: peer_addr %X peer_port %X self_addr %X self_port %X\n",
+		__func__,
+		migration_info->peer_addr, migration_info->peer_port,
+		migration_info->self_addr, migration_info->self_port);
+
+
 		ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port);
 		assert(ret == 0);
@@ -841,6 +839,9 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 		client->tls.is_ssl = false;
 	}
 
+	client->client_addr = migration_info->peer_addr;
+	client->client_port = migration_info->peer_port;
+
 	printf("deserialized: %s\n", client->uri_str);
 
 	/* quiting repair mode */
@@ -953,6 +954,8 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 			struct http_client *client = create_http_client(-1, -1);
 			client->to_migrate = migration_info->acting_primary_osd_id;
 			client->acting_primary_osd_id = migration_info->acting_primary_osd_id;
+			client->client_addr = migration_info->peer_addr;
+			client->client_port = migration_info->peer_addr;
 
 			SocketSerialize migration_info_handoff_again = *migration_info;
 

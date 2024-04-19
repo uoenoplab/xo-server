@@ -170,6 +170,10 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	client->epoll_data_u32 = S3_HTTP_EVENT;
 	int ret = get_mac_address(ifname, inet_ntoa(client_addr.sin_addr), client->client_mac);
 	assert(ret == 0);
+
+	client->client_addr = client_addr.sin_addr.s_addr;
+	client->client_port = client_addr.sin_port;
+
 	event.data.ptr = client;
 
 	set_socket_non_blocking(new_socket);
