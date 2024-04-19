@@ -87,9 +87,32 @@ target_include_directories(http_server PRIVATE
     ${LIBXML2_INCLUDE_DIR}
     ${LIBRADOS2_INCLUDE_DIRS})
 
+add_custom_command(
+    OUTPUT  ${CMAKE_BINARY_DIR}/ebpf_redirect_block_load.sh
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${SOURCE_DIR}/ebpf/load.sh
+            ${CMAKE_BINARY_DIR}/ebpf_redirect_block_load.sh
+    DEPENDS libforward-tc
+    COMMENT "Copying ebpf/load.sh to the build root directory"
+)
+
 ExternalProject_Get_property(libforward-tc BINARY_DIR)
 target_link_directories(http_server PUBLIC
     ${BINARY_DIR})
+
+add_custom_command(
+    OUTPUT  ${CMAKE_BINARY_DIR}/ebpf_redirect_block.o
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${BINARY_DIR}/ebpf_redirect_block.o
+            ${CMAKE_BINARY_DIR}/ebpf_redirect_block.o
+    DEPENDS libforward-tc
+    COMMENT "Copying ebpf_redirect_block.o to the build root directory"
+)
+
+add_custom_target(copy_ebpf_redirect_block ALL
+    DEPENDS ${CMAKE_BINARY_DIR}/ebpf_redirect_block_load.sh
+    DEPENDS ${CMAKE_BINARY_DIR}/ebpf_redirect_block.o
+)
 
 target_link_libraries(http_server PUBLIC
     llhttp_static
