@@ -193,12 +193,12 @@ void handle_client_disconnect(int epoll_fd, struct http_client *client,
 #ifdef USE_MIGRATION
 	// we don't free up client since we still need it for handoff_reset
 	if (client->from_migrate != -1) {
+		printf("Thread %d HANDOFF_OUT create handoff reset client to osd id %d on conn %d\n",
+			thread_id, client->from_migrate, client->fd);
 		handoff_out_serialize_reset(client);
-
 		int osd_arr_index = get_arr_index_from_osd_id(client->from_migrate);
 		handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client,
 			&handoff_out_ctxs[osd_arr_index], osd_arr_index, thread_id, false, true);
-
 		close(fd); // close will detele fd from epoll anyway
 		return;
 	}
@@ -528,7 +528,6 @@ static void *conn_wait(void *arg)
 				} else if (events[i].events & EPOLLOUT) {
 					struct http_client *client_to_handoff_again = NULL;
 					handoff_in_send(in_ctx, &client_to_handoff_again);
-					printf("client_to_handoff_again %p\n", client_to_handoff_again);
 					if (client_to_handoff_again) {
 						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
 							param->thread_id, client_to_handoff_again->to_migrate);
@@ -551,7 +550,6 @@ static void *conn_wait(void *arg)
 					handoff_out_send(out_ctx);
 				} else if (events[i].events & EPOLLIN) {
 					// handle handoff response, if all received, then swtich back to epollout
-					printf("invoke handoff_out_recv\n");
 					handoff_out_recv(out_ctx);
 				} else {
 					fprintf(stderr, "Thread %d HANDOFF_OUT unhandled event (fd %d events %d)\n",
