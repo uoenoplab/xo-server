@@ -775,6 +775,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 			close(out_ctx->fd);
 			exit(EXIT_FAILURE);
 		}
+		handoff_out_send(out_ctx);
 	}
 
 	printf("%s return\n", __func__);
