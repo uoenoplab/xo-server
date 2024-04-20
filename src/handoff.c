@@ -185,6 +185,13 @@ void handoff_out_serialize_reset(struct http_client *client)
 	ret = getsockname(client->fd, (struct sockaddr *)&self_sin, &slen);
 	assert(ret == 0);
 
+	// apply blocking
+	ret = apply_redirection_ebpf(client->client_addr, self_sin.sin_addr.s_addr,
+				client->client_port, self_sin.sin_port,
+				client->client_addr, client->client_mac, self_sin.sin_addr.s_addr, my_mac,
+				client->client_port, self_sin.sin_port, true);
+	assert(ret == 0);
+
 	// build reset proto_buf
 	SocketSerialize migration_info_reset = SOCKET_SERIALIZE__INIT;
 	migration_info_reset.msg_type = HANDOFF_RESET_REQUEST;
@@ -194,10 +201,10 @@ void handoff_out_serialize_reset(struct http_client *client)
 	migration_info_reset.peer_addr = client->client_addr;
 	migration_info_reset.peer_port = client->client_port;
 
-	printf("%s: peer_addr %X peer_port %X self_addr %X self_port %X\n",
+	printf("%s: peer_addr %X peer_port %d self_addr %X self_port %d\n",
 		__func__,
-		migration_info_reset.peer_addr, migration_info_reset.peer_port,
-		migration_info_reset.self_addr, migration_info_reset.self_port);
+		migration_info_reset.peer_addr, ntohs(migration_info_reset.peer_port),
+		migration_info_reset.self_addr, ntohs(migration_info_reset.self_port));
 
 	int proto_len = socket_serialize__get_packed_size(&migration_info_reset);
 	uint32_t net_proto_len = htonl(proto_len);
@@ -737,14 +744,14 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	}
 
 	// we don't need this for handoff_reset where fd already closed
-	if (out_ctx->client->fd >= 0) {
-		printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d remove ebpf block\n",
-			out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
-		// remove blocking
-		ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
-					migration_info->peer_port, migration_info->self_port);
-		assert(ret == 0);
-	}
+	// if (out_ctx->client->fd >= 0) {
+	printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d remove ebpf block\n",
+		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+	// remove blocking
+	ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+				migration_info->peer_port, migration_info->self_port);
+	assert(ret == 0);
+	// }
 
 	tls_free_client(out_ctx->client);
 	free_http_client(out_ctx->client);
@@ -922,7 +929,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	struct epoll_event event = {};
 	client->fd = rfd;
 	event.data.ptr = client;
-	event.events = EPOLLIN;
+	event.events = EPOLLIN | EPOLLRDHUP;
 	ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
 	assert(ret == 0);
 

@@ -168,6 +168,8 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	event.events = EPOLLIN | EPOLLRDHUP;
 	struct http_client *client = create_http_client(epoll_fd, new_socket);
 	client->epoll_data_u32 = S3_HTTP_EVENT;
+
+	// TODO: optimize
 	int ret = get_mac_address(ifname, inet_ntoa(client_addr.sin_addr), client->client_mac);
 	assert(ret == 0);
 
@@ -189,6 +191,10 @@ void handle_client_disconnect(int epoll_fd, struct http_client *client,
 	int thread_id, struct handoff_out *handoff_out_ctxs)
 {
 	int fd = client->fd;
+	int ret = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+	assert(ret == 0);
+
+	printf("Thread %d client disconnected %d\n", thread_id, fd);
 
 #ifdef USE_MIGRATION
 	// we don't free up client since we still need it for handoff_reset
@@ -279,12 +285,12 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 	if (bytes_received <= 0) {
 		// Client closed the connection or an error occurred
 		if (bytes_received == 0) {
-			fprintf(stderr, "Thread %d: Client disconnected: %d\n", thread_id, client->fd);
+			fprintf(stderr, "Thread %d: conn %d recv returned 0\n", thread_id, client->fd);
 		} else if (errno == EAGAIN && client->tls.is_ssl && client->tls.is_ktls_set) {
 			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
 			return 0;
 		} else {
-			fprintf(stderr, "Thread %d: Client disconnected: %d (%s)\n", thread_id, client->fd, strerror(errno));
+			fprintf(stderr, "Thread %d: conn %d recv returned -1 (%s)\n", thread_id, client->fd, strerror(errno));
 		}
 
 		// Remove the client socket from the epoll event list
@@ -441,15 +447,22 @@ static void *conn_wait(void *arg)
 				// Handle events using callback functions
 				struct http_client *c = (struct http_client *)events[i].data.ptr;
 				if (c->fd == server_fd) {
+					printf("S3_HTTP_EVENT handle_new_connection\n");
 					handle_new_connection(epoll_fd, param->ifname, server_fd, thread_id);
-				}
-				else if (events[i].events & EPOLLOUT) {
+				} else if ((events[i].events & EPOLLERR) ||
+						   (events[i].events & EPOLLHUP) ||
+						   (events[i].events & EPOLLRDHUP)) {
+					fprintf(stderr, "Thread %d S3_HTTP error event (fd %d events %d)\n",
+						param->thread_id, c->fd, events[i].events);
+					handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
+				} else if (events[i].events & EPOLLOUT) {
+					printf("S3_HTTP_EVENT send_client_data c->fd %d\n", c->fd);
 					ret = send_client_data(c);
 					if (ret == -1) {
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
 					}
-				}
-				else if (events[i].events & EPOLLIN) {
+				} else if (events[i].events & EPOLLIN) {
+					printf("S3_HTTP_EVENT handle_client_data\n");
 					ret = handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
 					if (ret == -1) {
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
@@ -477,6 +490,7 @@ static void *conn_wait(void *arg)
 				in_ctx->data_io_ctx = data_io_ctx;
 				in_ctx->bucket_io_ctx = bucket_io_ctx;
 				if (in_ctx->fd == param->handoff_in_eventfd) {
+					printf("HANDOFF_IN_EVENT handoff_in_eventfd\n");
 					if (events[i].events & EPOLLIN) {
 						uint64_t val;
 						int in_fd, osd_arr_index;
@@ -525,8 +539,10 @@ static void *conn_wait(void *arg)
 					// We don't handle recv state here since all we can do is
 					// wait main thread accept then trigger eventfd
 				} else if (events[i].events & EPOLLIN) {
+					printf("HANDOFF_IN_EVENT handoff_in_recv\n");
 					handoff_in_recv(in_ctx);
 				} else if (events[i].events & EPOLLOUT) {
+					printf("HANDOFF_IN_EVENT handoff_in_send\n");
 					struct http_client *client_to_handoff_again = NULL;
 					handoff_in_send(in_ctx, &client_to_handoff_again);
 					if (client_to_handoff_again) {
@@ -545,11 +561,14 @@ static void *conn_wait(void *arg)
 				if ((events[i].events & EPOLLERR) ||
 					(events[i].events & EPOLLHUP) ||
 					(events[i].events & EPOLLRDHUP)) {
+					printf("HANDOFF_OUT_EVENT handoff_out_reconnect\n");
 					// means current connection is broken
 					handoff_out_reconnect(out_ctx);
 				} else if (events[i].events & EPOLLOUT) {
+					printf("HANDOFF_OUT_EVENT handoff_out_send\n");
 					handoff_out_send(out_ctx);
 				} else if (events[i].events & EPOLLIN) {
+					printf("HANDOFF_OUT_EVENT handoff_out_recv\n");
 					// handle handoff response, if all received, then swtich back to epollout
 					handoff_out_recv(out_ctx);
 				} else {

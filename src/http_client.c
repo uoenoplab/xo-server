@@ -45,7 +45,7 @@ int send_client_data(struct http_client *client)
 		}
 
 		client->data_payload_sent += ret;
-		//printf("writev fd=%d called %ld/%ld %ld/%ld\n", client->fd, client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
+		// printf("writev fd=%d called %ld/%ld %ld/%ld\n", client->fd, client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
 	} else {
 		if (ret == 0 || (ret == -1 && errno != EAGAIN)) {
 			fprintf(stderr, "writev returned %d on fd %d (%s)\n", ret, client->fd, strerror(errno));
@@ -266,7 +266,7 @@ void send_response(struct http_client *client)
 	struct epoll_event event = {};
 	event.data.ptr = client;
 	//event.data.u32 = client->epoll_data_u32;
-	event.events = EPOLLOUT;
+	event.events = EPOLLOUT | EPOLLRDHUP;
 	int ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 	assert(ret == 0);
 }
