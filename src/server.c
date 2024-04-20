@@ -88,47 +88,68 @@ void handleCtrlC(int signum)
 	server_running = 0; // Set the flag to stop the server gracefully.
 }
 
-// Function to get MAC address from IP
-static int get_mac_address(const char *ifname, const char *ip_address, uint8_t *mac) {
-	struct arpreq arp_req;
-	struct sockaddr_in *sin;
-	int sock_fd;
 
-	memset(&arp_req, 0, sizeof(struct arpreq));
-	sin = (struct sockaddr_in *)&arp_req.arp_pa;
-	sin->sin_family = AF_INET;
+#define MAC_CACHE_SIZE 10  // Smaller cache for simplicity
 
-	// Convert IP string to network format
-	if (inet_pton(AF_INET, ip_address, &sin->sin_addr) != 1) {
-		perror("inet_pton failed");
-		return -1;
-	}
+struct cache_entry {
+    struct in_addr ip_addr; // IP address
+    uint8_t mac[6];         // MAC address
+    int valid;              // Validity flag to check if entry is used
+};
 
-	// Create a socket to communicate with the kernel
-	if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-		perror("socket failed");
-		return -1;
-	}
+struct cache_entry mac_cache[MAC_CACHE_SIZE] = {0};  // Cache initialization
 
-	// Copy the interface name to the request
-	strncpy(arp_req.arp_dev, ifname, IFNAMSIZ-1);
-
-	// Query the kernel for the hardware (MAC) address
-	if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
-		perror("ioctl SIOCGARP failed");
-		close(sock_fd);
-		return -1;
-	}
-
-	// Extract the MAC address from the reply
-	memcpy(mac, arp_req.arp_ha.sa_data, sizeof(uint8_t) * 6);
-	printf("MAC addr of remote ip %s is ", ip_address);
-	print_mac_address(mac);
-
-	close(sock_fd);
-	return 0;
+static int get_mac_from_cache(struct in_addr ip_addr, uint8_t *mac) {
+    for (int i = 0; i < MAC_CACHE_SIZE; i++) {
+        if (mac_cache[i].valid && mac_cache[i].ip_addr.s_addr == ip_addr.s_addr) {
+            memcpy(mac, mac_cache[i].mac, sizeof(mac));
+            return 1; // MAC found in cache
+        }
+    }
+    return 0; // Not found
 }
 
+static void add_mac_to_cache(struct in_addr ip_addr, uint8_t *mac) {
+    for (int i = 0; i < MAC_CACHE_SIZE; i++) {
+        if (!mac_cache[i].valid) {  // Check for the first unused spot
+            mac_cache[i].ip_addr = ip_addr;
+            memcpy(mac_cache[i].mac, mac, sizeof(mac_cache[i].mac));
+            mac_cache[i].valid = 1;
+            return;
+        }
+    }
+}
+
+static int get_mac_address(const char *ifname, struct sockaddr_in addr, uint8_t *mac) {
+    if (get_mac_from_cache(addr.sin_addr, mac)) {
+        return 0; // MAC found in cache, return immediately
+    }
+
+    struct arpreq arp_req;
+    int sock_fd;
+    memset(&arp_req, 0, sizeof(struct arpreq));
+    struct sockaddr_in *sin = (struct sockaddr_in *)&arp_req.arp_pa;
+    sin->sin_family = AF_INET;
+    sin->sin_addr = addr.sin_addr;
+
+    if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        perror("socket failed");
+        return -1;
+    }
+
+    strncpy(arp_req.arp_dev, ifname, IFNAMSIZ-1);
+    if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
+        perror("ioctl SIOCGARP failed");
+        close(sock_fd);
+        return -1;
+    }
+
+    memcpy(mac, arp_req.arp_ha.sa_data, sizeof(uint8_t) * 6);
+    add_mac_to_cache(addr.sin_addr, mac); // Add to cache
+
+    close(sock_fd);
+    return 0;
+}
 
 void set_socket_non_blocking(int socket_fd)
 {
@@ -160,7 +181,9 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 		return;
 	}
 
-	printf("Thread %d: Accepted connection (%d) from %s:%d\n", thread_id, new_socket, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+	char *ip_addr_str = inet_ntoa(client_addr.sin_addr);
+
+	printf("Thread %d: Accepted connection (%d) from %s:%d\n", thread_id, new_socket, ip_addr_str, ntohs(client_addr.sin_port));
 
 	// Add the new client socket to the epoll event list
 
@@ -170,8 +193,11 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	client->epoll_data_u32 = S3_HTTP_EVENT;
 
 	// TODO: optimize
-	int ret = get_mac_address(ifname, inet_ntoa(client_addr.sin_addr), client->client_mac);
+	int ret = get_mac_address(ifname, client_addr, client->client_mac);
 	assert(ret == 0);
+
+	printf("MAC addr of remote ip %s is ", ip_addr_str);
+	print_mac_address(client->client_mac);
 
 	client->client_addr = client_addr.sin_addr.s_addr;
 	client->client_port = client_addr.sin_port;
