@@ -165,7 +165,7 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	// Add the new client socket to the epoll event list
 
 	struct epoll_event event;
-	event.events = EPOLLIN;
+	event.events = EPOLLIN | EPOLLRDHUP;
 	struct http_client *client = create_http_client(epoll_fd, new_socket);
 	client->epoll_data_u32 = S3_HTTP_EVENT;
 	int ret = get_mac_address(ifname, inet_ntoa(client_addr.sin_addr), client->client_mac);
@@ -197,14 +197,13 @@ void handle_client_disconnect(int epoll_fd, struct http_client *client,
 			thread_id, client->from_migrate, client->fd);
 		handoff_out_serialize_reset(client);
 		int osd_arr_index = get_arr_index_from_osd_id(client->from_migrate);
-		handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client,
-			&handoff_out_ctxs[osd_arr_index], osd_arr_index, thread_id, false, true);
-		close(fd); // close will detele fd from epoll anyway
+		handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client,
+			&handoff_out_ctxs[osd_arr_index], osd_arr_index, thread_id);
 		return;
 	}
 #endif
 
-	close(fd); // close will detele fd from epoll anyway
+	close(fd);
 	tls_free_client(client);
 	free_http_client(client);
 }
@@ -460,9 +459,11 @@ static void *conn_wait(void *arg)
 					if (ret != -1 && enable_migration && c->to_migrate != -1) {
 						printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
 							param->thread_id, c->fd, c->to_migrate);
+						handoff_out_serialize(c);
+						printf("Thread %d HANDOFF_OUT serialized client on conn %d\n", param->thread_id, client->fd);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
-							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id, true, false);
+							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
 					}
 #endif
 				} else {
@@ -532,8 +533,8 @@ static void *conn_wait(void *arg)
 						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
 							param->thread_id, client_to_handoff_again->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(client_to_handoff_again->to_migrate);
-						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
-							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id, false, true);
+						handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
+							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
 					}
 				} else {
 					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",

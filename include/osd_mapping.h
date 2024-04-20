@@ -6,7 +6,6 @@
 extern char *osd_addr_strs[MAX_OSDS];
 extern struct sockaddr_in osd_addrs[MAX_OSDS];
 extern int osd_ids[MAX_OSDS];
-extern int osd_id_to_arr_index[];
 extern int num_osds;
 extern int num_peers;
 
