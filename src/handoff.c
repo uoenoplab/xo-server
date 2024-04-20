@@ -217,6 +217,8 @@ void handoff_out_serialize_reset(struct http_client *client)
 // **special serialize for re-handoff**
 static void handoff_out_serialize_rehandoff(struct http_client **client_to_handoff_again, SocketSerialize *migration_info)
 {
+	int ret = 0;
+
 	// apply blocking
 	ret = apply_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 			migration_info->peer_port, migration_info->self_port,
@@ -477,11 +479,17 @@ void handoff_out_connect(struct handoff_out *out_ctx) {
 			close(out_ctx->fd);
 			exit(EXIT_FAILURE);
 		}
+		out_ctx->is_fd_connected = false;
+		return;
 	}
+
+	out_ctx->is_fd_connected = true;
+	return;
 }
 
 void handoff_out_reconnect(struct handoff_out *out_ctx) {
 	out_ctx->reconnect_count++;
+	out_ctx->is_fd_connected = false;
 	if (out_ctx->reconnect_count > MAX_HANDOFF_OUT_RECONNECT) {
 		fprintf(stderr, "Thread %d HANDOFF_OUT try RE-connect too many times (osd id %d, ip %s, port %d, reconnect count %d)\n",
 			out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
@@ -533,9 +541,14 @@ static void do_handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct h
 		thread_id, osd_ids[out_ctx->osd_arr_index], client->fd);
 	}
 
-	// we have a connected fd and it is in epoll, let the epoll to consume this new request
-	if (out_ctx->is_fd_in_epoll)
+	if (out_ctx->client) {
 		return;
+	}
+
+	// we have a connected fd and it is in epoll, let the epoll to consume this new request
+	if (out_ctx->is_fd_in_epoll) {
+		return;
+	}
 
 	// we don't have a connceted fd, we need to create one
 	if (out_ctx->fd == 0) {
@@ -555,6 +568,10 @@ static void do_handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct h
 
 	out_ctx->is_fd_in_epoll = true;
 	out_ctx->epoll_fd = epoll_fd;
+
+	if (out_ctx->is_fd_connected) {
+		handoff_out_send(out_ctx);
+	}
 }
 
 void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
@@ -604,6 +621,7 @@ void handoff_out_send(struct handoff_out *out_ctx)
 	}
 
 	out_ctx->reconnect_count = 0;
+	out_ctx->is_fd_connected = true;
 	out_ctx->client->proto_buf_sent += ret;
 
 	// send done
@@ -665,6 +683,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	}
 
 	out_ctx->reconnect_count = 0;
+	out_ctx->is_fd_connected = true;
 	out_ctx->recv_protobuf_received += ret;
 	if (out_ctx->recv_protobuf_received < out_ctx->recv_protobuf_len)
 		return;
@@ -997,7 +1016,7 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 			printf("Thread %d HANDOFF_IN HANDOFF_BACK_REQUEST primary osd not current node, special serlize to osd id %d\n",
 				in_ctx->thread_id, migration_info->acting_primary_osd_id);
 
-			handoff_out_serialize_rehandoff(&in_ctx->client_to_handoff_again);
+			handoff_out_serialize_rehandoff(&in_ctx->client_to_handoff_again, migration_info);
 
 			printf("Thread %d HANDOFF_IN HANDOFF_BACK_REQUEST serialized client to osd id %d\n",
 				in_ctx->thread_id, migration_info->acting_primary_osd_id);

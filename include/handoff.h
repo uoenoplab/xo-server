@@ -59,6 +59,7 @@ struct handoff_out {
 	uint32_t epoll_data_u32;
 	int epoll_fd;
 	int fd;
+        bool is_fd_connected;
         bool is_fd_in_epoll;
         int reconnect_count;
         int osd_arr_index;

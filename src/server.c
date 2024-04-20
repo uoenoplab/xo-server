@@ -460,7 +460,7 @@ static void *conn_wait(void *arg)
 						printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
 							param->thread_id, c->fd, c->to_migrate);
 						handoff_out_serialize(c);
-						printf("Thread %d HANDOFF_OUT serialized client on conn %d\n", param->thread_id, client->fd);
+						printf("Thread %d HANDOFF_OUT serialized client on conn %d\n", param->thread_id, c->fd);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
