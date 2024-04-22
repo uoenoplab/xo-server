@@ -88,47 +88,69 @@ void handleCtrlC(int signum)
 	server_running = 0; // Set the flag to stop the server gracefully.
 }
 
-// Function to get MAC address from IP
-static int get_mac_address(const char *ifname, const char *ip_address, uint8_t *mac) {
-	struct arpreq arp_req;
-	struct sockaddr_in *sin;
-	int sock_fd;
 
-	memset(&arp_req, 0, sizeof(struct arpreq));
-	sin = (struct sockaddr_in *)&arp_req.arp_pa;
-	sin->sin_family = AF_INET;
+#define MAC_CACHE_SIZE 10  // Smaller cache for simplicity
 
-	// Convert IP string to network format
-	if (inet_pton(AF_INET, ip_address, &sin->sin_addr) != 1) {
-		perror("inet_pton failed");
-		return -1;
-	}
+struct cache_entry {
+    struct in_addr ip_addr; // IP address
+    uint8_t mac[6];         // MAC address
+    int valid;              // Validity flag to check if entry is used
+};
 
-	// Create a socket to communicate with the kernel
-	if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-		perror("socket failed");
-		return -1;
-	}
+struct cache_entry mac_cache[MAC_CACHE_SIZE] = {0};  // Cache initialization
 
-	// Copy the interface name to the request
-	strncpy(arp_req.arp_dev, ifname, IFNAMSIZ-1);
-
-	// Query the kernel for the hardware (MAC) address
-	if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
-		perror("ioctl SIOCGARP failed");
-		close(sock_fd);
-		return -1;
-	}
-
-	// Extract the MAC address from the reply
-	memcpy(mac, arp_req.arp_ha.sa_data, sizeof(uint8_t) * 6);
-	printf("MAC addr of remote ip %s is ", ip_address);
-	print_mac_address(mac);
-
-	close(sock_fd);
-	return 0;
+static int get_mac_from_cache(struct in_addr ip_addr, uint8_t *mac) {
+    for (int i = 0; i < MAC_CACHE_SIZE; i++) {
+        if (mac_cache[i].valid && mac_cache[i].ip_addr.s_addr == ip_addr.s_addr) {
+            memcpy(mac, mac_cache[i].mac, sizeof(mac));
+            return 1; // MAC found in cache
+        }
+    }
+    return 0; // Not found
 }
 
+static void add_mac_to_cache(struct in_addr ip_addr, uint8_t *mac) {
+    for (int i = 0; i < MAC_CACHE_SIZE; i++) {
+        if (!mac_cache[i].valid) {  // Check for the first unused spot
+            mac_cache[i].ip_addr = ip_addr;
+            memcpy(mac_cache[i].mac, mac, sizeof(mac_cache[i].mac));
+            mac_cache[i].valid = 1;
+            return;
+        }
+    }
+}
+
+static int get_mac_address(const char *ifname, struct sockaddr_in addr, uint8_t *mac) {
+    if (get_mac_from_cache(addr.sin_addr, mac)) {
+		printf("Mac cache hit\n");
+        return 0; // MAC found in cache, return immediately
+    }
+
+    struct arpreq arp_req;
+    int sock_fd;
+    memset(&arp_req, 0, sizeof(struct arpreq));
+    struct sockaddr_in *sin = (struct sockaddr_in *)&arp_req.arp_pa;
+    sin->sin_family = AF_INET;
+    sin->sin_addr = addr.sin_addr;
+
+    if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        perror("socket failed");
+        return -1;
+    }
+
+    strncpy(arp_req.arp_dev, ifname, IFNAMSIZ-1);
+    if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
+        perror("ioctl SIOCGARP failed");
+        close(sock_fd);
+        return -1;
+    }
+
+    memcpy(mac, arp_req.arp_ha.sa_data, sizeof(uint8_t) * 6);
+    add_mac_to_cache(addr.sin_addr, mac); // Add to cache
+
+    close(sock_fd);
+    return 0;
+}
 
 void set_socket_non_blocking(int socket_fd)
 {
@@ -160,16 +182,23 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 		return;
 	}
 
-	printf("Thread %d: Accepted connection (%d) from %s:%d\n", thread_id, new_socket, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+	char *ip_addr_str = inet_ntoa(client_addr.sin_addr);
+
+	printf("Thread %d: Accepted connection (%d) from %s:%d\n", thread_id, new_socket, ip_addr_str, ntohs(client_addr.sin_port));
 
 	// Add the new client socket to the epoll event list
 
 	struct epoll_event event;
-	event.events = EPOLLIN;
+	event.events = EPOLLIN | EPOLLRDHUP;
 	struct http_client *client = create_http_client(epoll_fd, new_socket);
 	client->epoll_data_u32 = S3_HTTP_EVENT;
-	int ret = get_mac_address(ifname, inet_ntoa(client_addr.sin_addr), client->client_mac);
+
+	// TODO: optimize
+	int ret = get_mac_address(ifname, client_addr, client->client_mac);
 	assert(ret == 0);
+
+	printf("MAC addr of remote ip %s is ", ip_addr_str);
+	print_mac_address(client->client_mac);
 
 	client->client_addr = client_addr.sin_addr.s_addr;
 	client->client_port = client_addr.sin_port;
@@ -189,6 +218,10 @@ void handle_client_disconnect(int epoll_fd, struct http_client *client,
 	int thread_id, struct handoff_out *handoff_out_ctxs)
 {
 	int fd = client->fd;
+	int ret = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+	assert(ret == 0);
+
+	printf("Thread %d client disconnected %d\n", thread_id, fd);
 
 #ifdef USE_MIGRATION
 	// we don't free up client since we still need it for handoff_reset
@@ -197,14 +230,13 @@ void handle_client_disconnect(int epoll_fd, struct http_client *client,
 			thread_id, client->from_migrate, client->fd);
 		handoff_out_serialize_reset(client);
 		int osd_arr_index = get_arr_index_from_osd_id(client->from_migrate);
-		handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client,
-			&handoff_out_ctxs[osd_arr_index], osd_arr_index, thread_id, false, true);
-		close(fd); // close will detele fd from epoll anyway
+		handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client,
+			&handoff_out_ctxs[osd_arr_index], osd_arr_index, thread_id);
 		return;
 	}
 #endif
 
-	close(fd); // close will detele fd from epoll anyway
+	close(fd);
 	tls_free_client(client);
 	free_http_client(client);
 }
@@ -280,12 +312,12 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 	if (bytes_received <= 0) {
 		// Client closed the connection or an error occurred
 		if (bytes_received == 0) {
-			fprintf(stderr, "Thread %d: Client disconnected: %d\n", thread_id, client->fd);
+			fprintf(stderr, "Thread %d: conn %d recv returned 0\n", thread_id, client->fd);
 		} else if (errno == EAGAIN && client->tls.is_ssl && client->tls.is_ktls_set) {
 			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
 			return 0;
 		} else {
-			fprintf(stderr, "Thread %d: Client disconnected: %d (%s)\n", thread_id, client->fd, strerror(errno));
+			fprintf(stderr, "Thread %d: conn %d recv returned -1 (%s)\n", thread_id, client->fd, strerror(errno));
 		}
 
 		// Remove the client socket from the epoll event list
@@ -442,15 +474,22 @@ static void *conn_wait(void *arg)
 				// Handle events using callback functions
 				struct http_client *c = (struct http_client *)events[i].data.ptr;
 				if (c->fd == server_fd) {
+					printf("S3_HTTP_EVENT handle_new_connection\n");
 					handle_new_connection(epoll_fd, param->ifname, server_fd, thread_id);
-				}
-				else if (events[i].events & EPOLLOUT) {
+				} else if ((events[i].events & EPOLLERR) ||
+						   (events[i].events & EPOLLHUP) ||
+						   (events[i].events & EPOLLRDHUP)) {
+					fprintf(stderr, "Thread %d S3_HTTP error event (fd %d events %d)\n",
+						param->thread_id, c->fd, events[i].events);
+					handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
+				} else if (events[i].events & EPOLLOUT) {
+					printf("S3_HTTP_EVENT send_client_data c->fd %d\n", c->fd);
 					ret = send_client_data(c);
 					if (ret == -1) {
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
 					}
-				}
-				else if (events[i].events & EPOLLIN) {
+				} else if (events[i].events & EPOLLIN) {
+					printf("S3_HTTP_EVENT handle_client_data\n");
 					ret = handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
 					if (ret == -1) {
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
@@ -460,9 +499,11 @@ static void *conn_wait(void *arg)
 					if (ret != -1 && enable_migration && c->to_migrate != -1) {
 						printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
 							param->thread_id, c->fd, c->to_migrate);
+						handoff_out_serialize(c);
+						printf("Thread %d HANDOFF_OUT serialized client on conn %d\n", param->thread_id, c->fd);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
-							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id, true, false);
+							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
 					}
 #endif
 				} else {
@@ -476,6 +517,7 @@ static void *conn_wait(void *arg)
 				in_ctx->data_io_ctx = data_io_ctx;
 				in_ctx->bucket_io_ctx = bucket_io_ctx;
 				if (in_ctx->fd == param->handoff_in_eventfd) {
+					printf("HANDOFF_IN_EVENT handoff_in_eventfd\n");
 					if (events[i].events & EPOLLIN) {
 						uint64_t val;
 						int in_fd, osd_arr_index;
@@ -524,16 +566,18 @@ static void *conn_wait(void *arg)
 					// We don't handle recv state here since all we can do is
 					// wait main thread accept then trigger eventfd
 				} else if (events[i].events & EPOLLIN) {
+					printf("HANDOFF_IN_EVENT handoff_in_recv\n");
 					handoff_in_recv(in_ctx);
 				} else if (events[i].events & EPOLLOUT) {
+					printf("HANDOFF_IN_EVENT handoff_in_send\n");
 					struct http_client *client_to_handoff_again = NULL;
 					handoff_in_send(in_ctx, &client_to_handoff_again);
 					if (client_to_handoff_again) {
 						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
 							param->thread_id, client_to_handoff_again->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(client_to_handoff_again->to_migrate);
-						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
-							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id, false, true);
+						handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
+							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
 					}
 				} else {
 					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",
@@ -544,11 +588,14 @@ static void *conn_wait(void *arg)
 				if ((events[i].events & EPOLLERR) ||
 					(events[i].events & EPOLLHUP) ||
 					(events[i].events & EPOLLRDHUP)) {
+					printf("HANDOFF_OUT_EVENT handoff_out_reconnect\n");
 					// means current connection is broken
 					handoff_out_reconnect(out_ctx);
 				} else if (events[i].events & EPOLLOUT) {
+					printf("HANDOFF_OUT_EVENT handoff_out_send\n");
 					handoff_out_send(out_ctx);
 				} else if (events[i].events & EPOLLIN) {
+					printf("HANDOFF_OUT_EVENT handoff_out_recv\n");
 					// handle handoff response, if all received, then swtich back to epollout
 					handoff_out_recv(out_ctx);
 				} else {

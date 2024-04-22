@@ -45,7 +45,7 @@ int send_client_data(struct http_client *client)
 		}
 
 		client->data_payload_sent += ret;
-		//printf("writev fd=%d called %ld/%ld %ld/%ld\n", client->fd, client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
+		// printf("writev fd=%d called %ld/%ld %ld/%ld\n", client->fd, client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
 	} else {
 		if (ret == 0 || (ret == -1 && errno != EAGAIN)) {
 			fprintf(stderr, "writev returned %d on fd %d (%s)\n", ret, client->fd, strerror(errno));
@@ -266,7 +266,7 @@ void send_response(struct http_client *client)
 	struct epoll_event event = {};
 	event.data.ptr = client;
 	//event.data.u32 = client->epoll_data_u32;
-	event.events = EPOLLOUT;
+	event.events = EPOLLOUT | EPOLLRDHUP;
 	int ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 	assert(ret == 0);
 }
@@ -317,7 +317,6 @@ static int on_headers_complete_cb(llhttp_t* parser)
 			client->acting_primary_osd_id = -1;
 			ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &client->acting_primary_osd_id);
 			assert(ret == 0);
-			printf("/%s/%s in osd.%d to migrate %d\n", client->bucket_name, client->object_name, client->acting_primary_osd_id, client->to_migrate);
 			if (get_my_osd_id() != client->acting_primary_osd_id) {
 				// we have to migrate the client back to where it origins first
 				// before migrate to actual primary osd_id
@@ -327,6 +326,9 @@ static int on_headers_complete_cb(llhttp_t* parser)
 					client->to_migrate = client->from_migrate;
 				}
 			}
+			printf("/%s/%s in osd.%d to migrate %d\n",
+				client->bucket_name, client->object_name,
+				client->acting_primary_osd_id, client->to_migrate);
 
 #ifdef USE_MIGRATION
 			if (client->to_migrate != -1) return 0;

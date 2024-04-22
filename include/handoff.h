@@ -59,6 +59,7 @@ struct handoff_out {
 	uint32_t epoll_data_u32;
 	int epoll_fd;
 	int fd;
+        bool is_fd_connected;
         bool is_fd_in_epoll;
         int reconnect_count;
         int osd_arr_index;
@@ -72,11 +73,14 @@ struct handoff_out {
 };
 
 void handoff_out_serialize_reset(struct http_client *client);
+void handoff_out_serialize(struct http_client *client);
 
 void handoff_out_connect(struct handoff_out *out_ctx);
 void handoff_out_reconnect(struct handoff_out *out_ctx);
 void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
-	struct handoff_out *out_ctx, int osd_arr_index, int thread_id, bool serialize, bool urgent);
+	struct handoff_out *out_ctx, int osd_arr_index, int thread_id);
+void handoff_out_issue_urgent(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
+	struct handoff_out *out_ctx, int osd_arr_index, int thread_id);
 void handoff_out_send(struct handoff_out *out_ctx);
 void handoff_out_recv(struct handoff_out *out_ctx);
 
