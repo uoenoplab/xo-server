@@ -7,7 +7,7 @@
 #include "object_store.h"
 #include "osd_mapping.h"
 
-#define FIRST_READ_SIZE sizeof(char) * 1024 * 4096
+#define FIRST_READ_SIZE sizeof(char) * 1024 * 8192
 
 void delete_objects(struct http_client *client, const char *buf, size_t length)
 {
