@@ -21,6 +21,8 @@
 
 #include "proto/socket_serialize.pb-c.h"
 
+#define USE_TC
+
 /*
 
           +--------+                 +--------+
@@ -201,10 +203,12 @@ void handoff_out_serialize_reset(struct http_client *client)
 	migration_info_reset.peer_addr = client->client_addr;
 	migration_info_reset.peer_port = client->client_port;
 
+#ifdef DEBUG
 	printf("%s: peer_addr %X peer_port %d self_addr %X self_port %d\n",
 		__func__,
 		migration_info_reset.peer_addr, ntohs(migration_info_reset.peer_port),
 		migration_info_reset.self_addr, ntohs(migration_info_reset.self_port));
+#endif
 
 	int proto_len = socket_serialize__get_packed_size(&migration_info_reset);
 	uint32_t net_proto_len = htonl(proto_len);
@@ -456,10 +460,12 @@ static void set_socket_non_blocking(int socket_fd)
 }
 
 void handoff_out_connect(struct handoff_out *out_ctx) {
+#ifdef DEBUG
 	printf("Thread %d HANDOFF_OUT try connect to osd id %d (ip %s, port %d)\n",
 		out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
 		osd_addr_strs[out_ctx->osd_arr_index],
 		ntohs(osd_addrs[out_ctx->osd_arr_index].sin_port));
+#endif
 
 	out_ctx->fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (out_ctx->fd == -1) {
@@ -528,7 +534,9 @@ void handoff_out_reconnect(struct handoff_out *out_ctx) {
 static void do_handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
 	struct handoff_out *out_ctx, int osd_arr_index, int thread_id, bool urgent)
 {
+#ifdef DEBUG
 	printf("%s enter\n", __func__);
+#endif
 
 	out_ctx->osd_arr_index = osd_arr_index;
 	out_ctx->thread_id = thread_id;
@@ -540,12 +548,16 @@ static void do_handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct h
 
 	if (urgent) {
 		handoff_out_enqueue_front(out_ctx->queue, client);
+#ifdef DEBUG
 		printf("Thread %d HANDOFF_OUT (front)enqueued migration work to osd id %d for s3 client conn %d\n",
 		thread_id, osd_ids[out_ctx->osd_arr_index], client->fd);
+#endif
 	} else {
 		handoff_out_enqueue(out_ctx->queue, client);
+#ifdef DEBUG
 		printf("Thread %d HANDOFF_OUT enqueued migration work to osd id %d for s3 client conn %d\n",
 		thread_id, osd_ids[out_ctx->osd_arr_index], client->fd);
+#endif
 	}
 
 	if (out_ctx->client) {
@@ -600,7 +612,9 @@ void handoff_out_issue_urgent(int epoll_fd, uint32_t epoll_data_u32, struct http
 // 2. if we have sent out the whole thing, we change to in mode and wait for response
 void handoff_out_send(struct handoff_out *out_ctx)
 {
+#ifdef DEBUG
 	printf("%s enter\n", __func__);
+#endif
 
 	if (out_ctx->client == NULL) {
 		if (out_ctx->queue == NULL) {
@@ -613,8 +627,10 @@ void handoff_out_send(struct handoff_out *out_ctx)
 		handoff_out_dequeue(out_ctx->queue, (void **)&out_ctx->client);
 	}
 
+#ifdef DEBUG
 	printf("Thread %d HANDOFF_OUT dequeued migration work to osd id %d for s3 client conn %d, now start send\n",
 		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+#endif
 
 	int ret = send(out_ctx->fd, out_ctx->client->proto_buf + out_ctx->client->proto_buf_sent,
 		out_ctx->client->proto_buf_len - out_ctx->client->proto_buf_sent, 0);
@@ -633,8 +649,10 @@ void handoff_out_send(struct handoff_out *out_ctx)
 
 	// send done
 	if (out_ctx->client->proto_buf_len == out_ctx->client->proto_buf_sent) {
+#ifdef DEBUG
 		printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d sent out, wait for handoff_done response\n",
 			out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+#endif
 
 		if (out_ctx->recv_protobuf != NULL) {
 			free(out_ctx->recv_protobuf);
@@ -654,7 +672,9 @@ void handoff_out_send(struct handoff_out *out_ctx)
 
 void handoff_out_recv(struct handoff_out *out_ctx)
 {
+#ifdef DEBUG
 	printf("%s enter\n", __func__);
+#endif
 
 	if (out_ctx->recv_protobuf == NULL) {
 		int ret = recv(out_ctx->fd, &out_ctx->recv_protobuf_len, sizeof(out_ctx->recv_protobuf_len), 0);
@@ -695,8 +715,10 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	if (out_ctx->recv_protobuf_received < out_ctx->recv_protobuf_len)
 		return;
 
+#ifdef DEBUG
 	printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d handoff_done response received\n",
 		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+#endif
 
 	SocketSerialize *migration_info = socket_serialize__unpack(NULL,
 		out_ctx->recv_protobuf_len, out_ctx->recv_protobuf);
@@ -718,26 +740,35 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	memcpy(fake_server_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
 
 	if (out_ctx->client->from_migrate == -1) {
+#ifdef DEBUG
 		printf("Thread %d HANDOFF_OUT normal handoff add redir rule to osd id %d conn %d\n",
 			out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+#endif
 
 		// normal handoff
 		// insert redirection rule: peer mac is fake server mac
+#ifdef USE_TC
 		ret = apply_redirection(migration_info->peer_addr, migration_info->self_addr,
 					migration_info->peer_port, migration_info->self_port,
 					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
 					migration_info->peer_port, migration_info->self_port, false, true);
+#else
+		ret = apply_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+					migration_info->peer_port, migration_info->self_port,
+					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
+					migration_info->peer_port, migration_info->self_port, false);
+#endif
 		assert(ret == 0);
 	} else {
 		// handoff back and handoff reset
 		// remove src IP modification
-
+#ifdef DEBUG
 		printf("Thread %d HANDOFF_OUT handoff back/reset to osd id %d conn %d "
 			"remove src ip modification peer_addr %X peer_port %X self_addr %X self_port %X\n",
 			out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd,
 			migration_info->peer_addr, migration_info->peer_port,
 			migration_info->self_addr, migration_info->self_port);
-
+#endif
 		ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port);
 		assert(ret == 0);
@@ -745,12 +776,16 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 
 	// we don't need this for handoff_reset where fd already closed
 	// if (out_ctx->client->fd >= 0) {
+#ifdef DEBUG
 	printf("Thread %d HANDOFF_OUT migration request to osd id %d for s3 client conn %d remove ebpf block\n",
 		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+#endif
 	// remove blocking
+#ifdef USE_TC
 	ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
 				migration_info->peer_port, migration_info->self_port);
 	assert(ret == 0);
+#endif
 	// }
 
 	tls_free_client(out_ctx->client);
@@ -763,7 +798,9 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 			perror("epoll_ctl");
 			exit(EXIT_FAILURE);
 		}
+#ifdef DEBUG
 		printf("set is_fd_in_epoll to false\n");
+#endif
 		out_ctx->is_fd_in_epoll = false;
 		return;
 	} else {
@@ -778,7 +815,9 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		handoff_out_send(out_ctx);
 	}
 
+#ifdef DEBUG
 	printf("%s return\n", __func__);
+#endif
 }
 
 static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
@@ -900,7 +939,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	struct http_client *client = create_http_client(in_ctx->epoll_fd, rfd);
 	snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, "%s", migration_info->bucket_name);
 	snprintf(client->object_name, MAX_OBJECT_NAME_SIZE, "%s", migration_info->object_name);
-	client->uri_str = realloc(client->uri_str, sizeof(char) * (strlen(migration_info->uri_str) + 1));
+	//client->uri_str = realloc(client->uri_str, sizeof(char) * (strlen(migration_info->uri_str) + 1));
 	snprintf(client->uri_str, strlen(migration_info->uri_str) + 1, "%s", migration_info->uri_str);
 	client->object_size = migration_info->object_size;
 	client->method = migration_info->method;
@@ -922,7 +961,9 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	client->client_addr = migration_info->peer_addr;
 	client->client_port = migration_info->peer_port;
 
+#ifdef DEBUG
 	printf("deserialized: %s fd %d\n", client->uri_str, client->fd);
+#endif
 
 	/* quiting repair mode */
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
@@ -944,8 +985,10 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 
 void handoff_in_disconnect(struct handoff_in *in_ctx)
 {
+#ifdef DEBUG
 	printf("Thread %d HANDOFF_IN disconnect conn %d (epoll_fd %d, osd arr index %d, osd id %d)\n",
 		in_ctx->thread_id, in_ctx->fd, in_ctx->epoll_fd, in_ctx->osd_arr_index, osd_ids[in_ctx->osd_arr_index]);
+#endif
 	// main thread will handle actual close and new accept comein
 	if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_DEL, in_ctx->fd, NULL) == -1) {
 		// maybe already closed by main
@@ -1008,7 +1051,9 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 	in_ctx->recv_protobuf_received = 0;
 
 	if (migration_info->msg_type == HANDOFF_REQUEST) {
+#ifdef DEBUG
 		printf("Thread %d HANDOFF_IN HANDOFF_REQUEST start deserialize\n", in_ctx->thread_id);
+#endif
 		handoff_in_deserialize(in_ctx, migration_info);
 		// apply src IP modification
 		ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
@@ -1018,37 +1063,59 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 		assert(ret == 0);
 	} else if (migration_info->msg_type == HANDOFF_BACK_REQUEST) {
 		if (migration_info->acting_primary_osd_id == get_my_osd_id()) {
+#ifdef DEBUG
 			printf("Thread %d HANDOFF_IN HANDOFF_BACK_REQUEST primary osd is current node, deserlize\n", in_ctx->thread_id);
 			handoff_in_deserialize(in_ctx, migration_info);
+#endif
 		} else {
+#ifdef DEBUG
 			printf("Thread %d HANDOFF_IN HANDOFF_BACK_REQUEST primary osd not current node, special serlize to osd id %d\n",
 				in_ctx->thread_id, migration_info->acting_primary_osd_id);
+#endif
 
 			handoff_out_serialize_rehandoff(&in_ctx->client_to_handoff_again, migration_info);
 
+#ifdef DEBUG
 			printf("Thread %d HANDOFF_IN HANDOFF_BACK_REQUEST serialized client to osd id %d\n",
 				in_ctx->thread_id, migration_info->acting_primary_osd_id);
+#endif
 		}
 		// we are safe to remove previous redir to fake server there since we
 		// either have a working fd or blocked incoming packets
+#ifdef DEBUG
 		printf("Thread %d HANDOFF_IN HANDOFF_BACK_REQUEST delete redir rule from"
 			" client to osd id %d peer_addr %X peer_port %X\n",
 			in_ctx->thread_id, osd_ids[in_ctx->osd_arr_index],
 			migration_info->peer_addr, migration_info->peer_port,
 			migration_info->self_addr, migration_info->self_port);
+#endif
 
-		remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-			migration_info->peer_port, migration_info->self_port);
+#ifdef USE_TC
+		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+					migration_info->peer_port, migration_info->self_port);
+#else
+		ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+					migration_info->peer_port, migration_info->self_port);
+#endif
+		assert(ret == 0);
 
 	} else if (migration_info->msg_type == HANDOFF_RESET_REQUEST) {
+#ifdef DEBUG
 		printf("Thread %d HANDOFF_IN HANDOFF_RESET_REQUEST delete redir rule from"
 			" client to osd id %d peer_addr %X peer_port %X\n",
 			in_ctx->thread_id, osd_ids[in_ctx->osd_arr_index],
 			migration_info->peer_addr, migration_info->peer_port,
 			migration_info->self_addr, migration_info->self_port);
+#endif
 
-		remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-			migration_info->peer_port, migration_info->self_port);
+#ifdef USE_TC
+		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+					migration_info->peer_port, migration_info->self_port);
+#else
+		ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+					migration_info->peer_port, migration_info->self_port);
+#endif
+		assert(ret == 0);
 	} else {
 		fprintf(stderr, "%s: can only handle HANDOFF_REQUEST or HANDOFF_BACK_REQUEST msg\n", __func__);
 		exit(EXIT_FAILURE);
@@ -1109,9 +1176,10 @@ void handoff_in_send(struct handoff_in *in_ctx, struct http_client **client_to_h
 			in_ctx->thread_id, osd_ids[in_ctx->osd_arr_index], in_ctx->send_protobuf_sent, in_ctx->send_protobuf_len);
 		return;
 	}
-
+#ifdef DEBUG
 	printf("Thread %d HANDOFF_IN response to osd id %d all sent\n",
 		in_ctx->thread_id, osd_ids[in_ctx->osd_arr_index]);
+#endif
 
 	// send done
 	if (in_ctx->send_protobuf != NULL) {

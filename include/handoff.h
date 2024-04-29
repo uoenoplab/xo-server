@@ -53,7 +53,7 @@ struct handoff_out_queue {
     struct handoff_out_req* rear;
 };
 
-#define MAX_HANDOFF_OUT_RECONNECT 10
+#define MAX_HANDOFF_OUT_RECONNECT 5
 
 struct handoff_out {
 	uint32_t epoll_data_u32;

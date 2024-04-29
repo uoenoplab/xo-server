@@ -208,7 +208,7 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	set_socket_non_blocking(new_socket);
 
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &event) == -1) {
-		perror("epoll_ctl");
+		perror("handle_new_connection: epoll_ctl");
 		close(new_socket);
 		free_http_client(client);
 	}
@@ -226,8 +226,10 @@ void handle_client_disconnect(int epoll_fd, struct http_client *client,
 #ifdef USE_MIGRATION
 	// we don't free up client since we still need it for handoff_reset
 	if (client->from_migrate != -1) {
+#ifdef DEBUG
 		printf("Thread %d HANDOFF_OUT create handoff reset client to osd id %d on conn %d\n",
 			thread_id, client->from_migrate, client->fd);
+#endif
 		handoff_out_serialize_reset(client);
 		int osd_arr_index = get_arr_index_from_osd_id(client->from_migrate);
 		handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client,
@@ -312,12 +314,16 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 	if (bytes_received <= 0) {
 		// Client closed the connection or an error occurred
 		if (bytes_received == 0) {
+#ifdef DEBUG
 			fprintf(stderr, "Thread %d: conn %d recv returned 0\n", thread_id, client->fd);
+#endif
 		} else if (errno == EAGAIN && client->tls.is_ssl && client->tls.is_ktls_set) {
 			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
 			return 0;
 		} else {
+#ifdef DEBUG
 			fprintf(stderr, "Thread %d: conn %d recv returned -1 (%s)\n", thread_id, client->fd, strerror(errno));
+#endif
 		}
 
 		// Remove the client socket from the epoll event list
@@ -444,10 +450,8 @@ static void *conn_wait(void *arg)
 	struct http_client *server_client = create_http_client(epoll_fd, server_fd);
 	server_client->epoll_data_u32 = S3_HTTP_EVENT;
 	event.data.ptr = server_client;
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
-		perror("epoll_ctl");
-		exit(EXIT_FAILURE);
-	}
+	ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event);
+	assert(ret == 0);
 
 	printf("Thread %d HANDOFF_IN Ready to get accepted connections from main thread on eventfd %d\n",
 		param->thread_id, param->handoff_in_eventfd);
@@ -474,7 +478,9 @@ static void *conn_wait(void *arg)
 				// Handle events using callback functions
 				struct http_client *c = (struct http_client *)events[i].data.ptr;
 				if (c->fd == server_fd) {
+#ifdef DEBUG
 					printf("S3_HTTP_EVENT handle_new_connection\n");
+#endif
 					handle_new_connection(epoll_fd, param->ifname, server_fd, thread_id);
 				} else if ((events[i].events & EPOLLERR) ||
 						   (events[i].events & EPOLLHUP) ||
@@ -483,13 +489,17 @@ static void *conn_wait(void *arg)
 						param->thread_id, c->fd, events[i].events);
 					handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
 				} else if (events[i].events & EPOLLOUT) {
+#ifdef DEBUG
 					printf("S3_HTTP_EVENT send_client_data c->fd %d\n", c->fd);
+#endif
 					ret = send_client_data(c);
 					if (ret == -1) {
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
 					}
 				} else if (events[i].events & EPOLLIN) {
+#ifdef DEBUG
 					printf("S3_HTTP_EVENT handle_client_data\n");
+#endif
 					ret = handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
 					if (ret == -1) {
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
@@ -497,16 +507,21 @@ static void *conn_wait(void *arg)
 #ifdef USE_MIGRATION
 					// check if ret okay, connection could be closed
 					if (ret != -1 && enable_migration && c->to_migrate != -1) {
+#ifdef DEBUG
 						printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
 							param->thread_id, c->fd, c->to_migrate);
+#endif
 						handoff_out_serialize(c);
+#ifdef DEBUG
 						printf("Thread %d HANDOFF_OUT serialized client on conn %d\n", param->thread_id, c->fd);
+#endif
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
 					}
 #endif
-				} else {
+				}
+				else {
 					fprintf(stderr, "Thread %d S3_HTTP unhandled event (fd %d events %d)\n",
 						param->thread_id, c->fd, events[i].events);
 				}
@@ -517,7 +532,9 @@ static void *conn_wait(void *arg)
 				in_ctx->data_io_ctx = data_io_ctx;
 				in_ctx->bucket_io_ctx = bucket_io_ctx;
 				if (in_ctx->fd == param->handoff_in_eventfd) {
+#ifdef DEBUG
 					printf("HANDOFF_IN_EVENT handoff_in_eventfd\n");
+#endif
 					if (events[i].events & EPOLLIN) {
 						uint64_t val;
 						int in_fd, osd_arr_index;
@@ -527,6 +544,7 @@ static void *conn_wait(void *arg)
 							exit(EXIT_FAILURE);
 						}
 						split_uint64_to_ints(val, &in_fd, &osd_arr_index);
+#ifdef DEBUG
 						if (handoff_in_ctxs[osd_arr_index].fd == 0) {
 							printf("Thread %d HANDOFF_IN receives a new conn %d (osd id %d)\n",
 								param->thread_id, in_fd, osd_ids[osd_arr_index]);
@@ -535,6 +553,7 @@ static void *conn_wait(void *arg)
 							printf("Thread %d HANDOFF_IN receives a new conn %d and overwrites old conn (osd id %d)\n",
 								param->thread_id, in_fd, osd_ids[osd_arr_index]);
 						}
+#endif
 						handoff_in_ctxs[osd_arr_index].fd = in_fd;
 						handoff_in_ctxs[osd_arr_index].epoll_fd = epoll_fd;
 						handoff_in_ctxs[osd_arr_index].osd_arr_index = osd_arr_index;
@@ -548,38 +567,48 @@ static void *conn_wait(void *arg)
 							event.events = EPOLLOUT;
 						}
 						event.data.ptr = &handoff_in_ctxs[osd_arr_index];
-						if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event) == -1) {
-							perror("epoll_ctl");
-							exit(EXIT_FAILURE);
-						}
-					} else {
+						ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event);
+						assert(ret == 0);
+					}
+#ifdef DEBUG
+					else {
 						printf("Thread %d HANDOFF_IN unhanlded event on eventfd (events %d)\n",
 							param->thread_id, events[i].events);
 					}
+#endif
 				} else if ((events[i].events & EPOLLERR) ||
 						   (events[i].events & EPOLLHUP) ||
 						   (events[i].events & EPOLLRDHUP)){
+#ifdef DEBUG
 					fprintf(stderr, "Thread %d HANDOFF_IN received err/hup event"
 						"on conn %d, drop this conn (events %d osd id %d)\n",
 						param->thread_id, in_ctx->fd, events[i].events, osd_ids[in_ctx->osd_arr_index]);
+#endif
 					handoff_in_disconnect(in_ctx);
 					// We don't handle recv state here since all we can do is
 					// wait main thread accept then trigger eventfd
 				} else if (events[i].events & EPOLLIN) {
+#ifdef DEBUG
 					printf("HANDOFF_IN_EVENT handoff_in_recv\n");
+#endif
 					handoff_in_recv(in_ctx);
 				} else if (events[i].events & EPOLLOUT) {
+#ifdef DEBUG
 					printf("HANDOFF_IN_EVENT handoff_in_send\n");
+#endif
 					struct http_client *client_to_handoff_again = NULL;
 					handoff_in_send(in_ctx, &client_to_handoff_again);
 					if (client_to_handoff_again) {
+#ifdef DEBUG
 						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
 							param->thread_id, client_to_handoff_again->to_migrate);
+#endif
 						int osd_arr_index = get_arr_index_from_osd_id(client_to_handoff_again->to_migrate);
 						handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
 					}
-				} else {
+				}
+				else {
 					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",
 						param->thread_id, in_ctx->fd, events[i].events);
 				}
@@ -588,17 +617,24 @@ static void *conn_wait(void *arg)
 				if ((events[i].events & EPOLLERR) ||
 					(events[i].events & EPOLLHUP) ||
 					(events[i].events & EPOLLRDHUP)) {
+#ifdef DEBUG
 					printf("HANDOFF_OUT_EVENT handoff_out_reconnect\n");
+#endif
 					// means current connection is broken
 					handoff_out_reconnect(out_ctx);
 				} else if (events[i].events & EPOLLOUT) {
+#ifdef DEBUG
 					printf("HANDOFF_OUT_EVENT handoff_out_send\n");
+#endif
 					handoff_out_send(out_ctx);
 				} else if (events[i].events & EPOLLIN) {
+#ifdef DEBUG
 					printf("HANDOFF_OUT_EVENT handoff_out_recv\n");
+#endif
 					// handle handoff response, if all received, then swtich back to epollout
 					handoff_out_recv(out_ctx);
-				} else {
+				}
+				else {
 					fprintf(stderr, "Thread %d HANDOFF_OUT unhandled event (fd %d events %d)\n",
 						param->thread_id, events[i].data.fd, events[i].events);
 				}
@@ -621,6 +657,8 @@ static void *conn_wait(void *arg)
 
 	rados_ioctx_destroy(bucket_io_ctx);
 	rados_ioctx_destroy(data_io_ctx);
+
+	free(client_data_buffer);
 
 	return NULL;
 }
@@ -765,10 +803,8 @@ int handoff_server_create_epoll(int listen_fd)
 	struct epoll_event event = {0};
 	event.data.fd = listen_fd;
 	event.events = EPOLLIN;
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event) == -1) {
-		perror("epoll_ctl");
-		return -1;
-	}
+	int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event);
+	assert(ret == 0);
 
 	return epoll_fd;
 }
@@ -784,9 +820,15 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 	printf("Ready to receive handoff_in connections on port %d\n", HANDOFF_CTRL_PORT);
 	while (server_running) {
 		nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-		if (nfds == -1 && errno != EINTR) {
-			perror("epoll_wait");
-			exit(EXIT_FAILURE);
+		if (nfds == -1) {
+			if (errno == EINTR) {
+				//printf("EINTR\n");
+				continue;
+			}
+			else {
+				perror("epoll_wait: handoff_server_loop");
+				exit(EXIT_FAILURE);
+			}
 		}
 
 		for (n = 0; n < nfds; n++) {
@@ -836,8 +878,9 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 				}
 
 				int i = -1;
-				for (; i < num_peers; i++) {
-					if (osd_addrs[i].sin_addr.s_addr == in_addr.sin_addr.s_addr) {
+				for (int j = 0; j < num_peers; j++) {
+					if (osd_addrs[j].sin_addr.s_addr == in_addr.sin_addr.s_addr) {
+						i = j;
 						break;
 					}
 				}
@@ -846,7 +889,7 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 					printf("Accepted handoff_in fd %d (host %s, port %d, osd_id %d)\n",
 						in_fd, osd_addr_strs[i], ntohs(in_addr.sin_port), osd_ids[i]);
 				} else {
-					printf("Unkown handoff_in client, not in osd list, drop\n");
+					printf("Unkown handoff_in client %s, not in osd list, drop\n", inet_ntoa(in_addr.sin_addr));
 					close(in_fd);
 					exit(EXIT_FAILURE);
 				}
@@ -866,7 +909,9 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 				if (thread_id != -1) {
 					set_socket_non_blocking(in_fd);
 					handoff_in_fds[thread_id][osd_arr_index] = in_fd;
+#ifdef DEBUG
 					printf("Dispatch conn %d to thread %d\n", in_fd, thread_id);
+#endif
 					// printf("combine_ints_to_uint64(in_fd %d, osd_arr_index %d)\n", in_fd, osd_arr_index);
 					uint64_t val = combine_ints_to_uint64(in_fd, osd_arr_index);
 					int ret = write(params[thread_id].handoff_in_eventfd, &val, sizeof(val));
@@ -877,16 +922,16 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 					struct epoll_event event = {0};
 					event.data.fd = in_fd;
 					event.events = EPOLLRDHUP;
-					if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event) == -1) {
-						perror("epoll_ctl");
-						exit(EXIT_FAILURE);
-					}
+					ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event);
+					assert(ret == 0);
 				} else {
 					// TODO: we should actually scan all handoff_in_ctxs here to
 					// check is any disconnect before this, otherwise cient
 					// shouldn't send a new connection?
+#ifdef DEBUG
 					printf("Redundant conn fd %d (host %s, port %d, osd_id %d)\n",
 						in_fd, osd_addr_strs[osd_arr_index], ntohs(in_addr.sin_port), osd_arr_index);
+#endif
 					close(in_fd);
 				}
 			} else {
@@ -897,6 +942,7 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 
 	close(epoll_fd);
 	close(listen_fd);
+	printf("handoff loop terminating\n");
 }
 
 int main(int argc, char *argv[])
@@ -1053,16 +1099,21 @@ int main(int argc, char *argv[])
 
 		close(param[i].handoff_in_eventfd);
 	}
+	printf("all thread killed\n");
 
 	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);
+	printf("rados shutdown\n");
 
 	for (int i = 0; i < num_osds; i++) {
 		if (osd_addr_strs[i] != NULL) free(osd_addr_strs[i]);
 	}
+	printf("osd addr freed\n");
 
 	fini_forward();
+	printf("libforward freed\n");
 	fini_forward_ebpf();
+	printf("libforward ebpf freed\n");
 	printf("Server terminated!\n");
 
 	return 0;

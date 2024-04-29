@@ -80,8 +80,8 @@ void aio_head_read_callback(rados_completion_t comp, void *arg) {
 			size_t bytes_read = client->object_size;
 			client->object_size = full_object_size;
 
-			client->data_payload = realloc(client->data_payload, client->object_size);
-			assert(client->data_payload != NULL);
+			//client->data_payload = realloc(client->data_payload, client->object_size);
+			//assert(client->data_payload != NULL);
 			client->data_payload_size = client->object_size;
 
 			ret = rados_read(client->data_io_ctx, client->object_name, client->data_payload + bytes_read, tail_size, bytes_read);
@@ -109,8 +109,8 @@ void init_object_get_request(struct http_client *client)
 		//}
 
 		//client->data_payload = malloc(FIRST_READ_SIZE);
-		client->data_payload = realloc(client->data_payload, FIRST_READ_SIZE);
-		assert(client->data_payload != NULL);
+		//client->data_payload = realloc(client->data_payload, FIRST_READ_SIZE);
+		//assert(client->data_payload != NULL);
 
 		rados_release_read_op(client->read_op);
 		client->read_op = rados_create_read_op();
@@ -227,8 +227,8 @@ void complete_post_request(struct http_client *client, const char *datetime_str)
 			// dump XML document
 			xmlDocDumpMemoryEnc(response_doc, &xmlbuf, &xmlbuf_size, "UTF-8");
 			//client->data_payload = malloc(xmlbuf_size + 1);
-			client->data_payload = realloc(client->data_payload, xmlbuf_size + 1);
-			assert(client->data_payload != NULL);
+			//client->data_payload = realloc(client->data_payload, xmlbuf_size + 1);
+			//assert(client->data_payload != NULL);
 
 			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
 			client->data_payload[xmlbuf_size] = '\0';
@@ -318,8 +318,8 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 			client->response_size--;
 
 			//client->data_payload = malloc(xmlbuf_size + 1);
-			client->data_payload = realloc(client->data_payload, xmlbuf_size + 1);
-			assert(client->data_payload != NULL);
+			//client->data_payload = realloc(client->data_payload, xmlbuf_size + 1);
+			//assert(client->data_payload != NULL);
 
 			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
 			client->data_payload[xmlbuf_size] = '\0';
@@ -606,8 +606,8 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 			client->response_size--; // we don't send the null
 
 			//client->data_payload = malloc(xmlbuf_size + 1);
-			client->data_payload = realloc(client->data_payload, xmlbuf_size + 1);
-			assert(client->data_payload != NULL);
+			//client->data_payload = realloc(client->data_payload, xmlbuf_size + 1);
+			//assert(client->data_payload != NULL);
 
 			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
 			client->data_payload[xmlbuf_size] = '\0';
@@ -671,14 +671,12 @@ void init_object_put_request(struct http_client *client) {
 		initRollingMD5(&(client->md5_ctx));
 
 		size_t obj_size_str_len = snprintf(NULL, 0, "%ld", client->object_size) + 1;
-		char *obj_size_str = malloc(obj_size_str_len);
+		char obj_size_str[obj_size_str_len];
 		snprintf(obj_size_str, obj_size_str_len, "%ld", client->object_size) * sizeof(char);
 
 		rados_release_write_op(client->write_op);
 		client->write_op = rados_create_write_op();
 		rados_write_op_create(client->write_op, LIBRADOS_CREATE_EXCLUSIVE, NULL);
 		rados_write_op_setxattr(client->write_op, "size", obj_size_str, obj_size_str_len);
-
-		free(obj_size_str);
 	}
 }

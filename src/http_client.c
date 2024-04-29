@@ -113,8 +113,8 @@ static int on_url_cb(llhttp_t *parser, const char *at, size_t length)
 {
 	struct http_client *client = (struct http_client*)parser->data;
 
-	client->uri_str = realloc(client->uri_str, client->uri_str_len + length);
-	assert(client->uri_str != NULL);
+	//client->uri_str = realloc(client->uri_str, client->uri_str_len + length);
+	//assert(client->uri_str != NULL);
 	memcpy(client->uri_str + client->uri_str_len, at, length);
 	client->uri_str_len += length;
 
@@ -129,14 +129,13 @@ static int on_url_complete_cb(llhttp_t* parser)
 	int ret;
 	UriUriA uri;
 
-	client->uri_str = realloc(client->uri_str, client->uri_str_len + 1);
-	assert(client->uri_str != NULL);
+	//client->uri_str = realloc(client->uri_str, client->uri_str_len + 1);
+	//assert(client->uri_str != NULL);
 	client->uri_str[client->uri_str_len] = '\0';
 
 	// if url bigger than something, return 414 Too long request
 
-	char *tmp_url = malloc(sizeof(char) * (client->uri_str_len + 1));
-	assert(tmp_url != NULL);
+	char tmp_url[client->uri_str_len + 1];
 	memcpy(tmp_url, client->uri_str, client->uri_str_len);
 	tmp_url[client->uri_str_len] = '\0';
 
@@ -166,8 +165,6 @@ static int on_url_complete_cb(llhttp_t* parser)
 			snprintf(client->object_name, MAX_OBJECT_NAME_SIZE, "%s", token);
 		}
 	}
-
-	free(tmp_url);
 
 //	if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
 //		 fprintf(stderr, "Parse uri fail: %d\n", errorPos);
@@ -326,9 +323,11 @@ static int on_headers_complete_cb(llhttp_t* parser)
 					client->to_migrate = client->from_migrate;
 				}
 			}
+#ifdef DEBUG
 			printf("/%s/%s in osd.%d to migrate %d\n",
 				client->bucket_name, client->object_name,
 				client->acting_primary_osd_id, client->to_migrate);
+#endif
 
 #ifdef USE_MIGRATION
 			if (client->to_migrate != -1) return 0;
@@ -344,7 +343,7 @@ static int on_headers_complete_cb(llhttp_t* parser)
 		const char *errorPos;
 		int ret = -1;
 
-		char *url = malloc(client->uri_str_len + 1);
+		char url[client->uri_str_len + 1];
 		memcpy(url, client->uri_str, client->uri_str_len);
 		url[client->uri_str_len] = '\0';
 
@@ -366,7 +365,6 @@ static int on_headers_complete_cb(llhttp_t* parser)
 
 		if (ret == URI_SUCCESS)
 			uriFreeUriMembersA(&uri);
-		free(url);
 	}
 
 	if (client->expect == CONTINUE) {
@@ -456,9 +454,9 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	client->settings.on_body = on_body_cb;
 
 	client->put_buf = malloc(0);
-	client->data_payload = malloc(0);
+	//client->data_payload = malloc(0);
 	//client->response = NULL;
-	client->uri_str = malloc(0);
+	//client->uri_str = malloc(0);
 	reset_http_client(client);
 
 	client->epoll_fd = epoll_fd;
@@ -500,14 +498,14 @@ void free_http_client(struct http_client *client)
 
 //	free(client->header_fields);
 //	free(client->header_values);
-	free(client->uri_str);
-	free(client->data_payload);
+	//free(client->uri_str);
+	//free(client->data_payload);
 	free(client->put_buf);
 
 	rados_aio_release(client->aio_head_read_completion);
 	rados_aio_release(client->aio_completion);
 	rados_release_write_op(client->write_op);
-	rados_release_write_op(client->read_op);
+	rados_release_read_op(client->read_op);
 
 	free(client);
 }

@@ -58,7 +58,8 @@ struct http_client {
 
 	ssize_t data_payload_sent;
 	ssize_t data_payload_size;
-	char *data_payload;
+	//char *data_payload;
+	char data_payload[8 * 1024 * 1024];
 
 	ssize_t response_sent;
 	ssize_t response_size;
@@ -75,7 +76,8 @@ struct http_client {
 	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html
 	char object_name[MAX_OBJECT_NAME_SIZE];
 
-	char *uri_str;
+	//char *uri_str;
+	char uri_str[1024];
 	size_t uri_str_len;
 	//UriUriA uri;
 
