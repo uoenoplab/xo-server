@@ -141,7 +141,10 @@ static inline int count_tls_records(const char *buffer, size_t buf_size) {
     while (i + 5 <= buf_size) { // Ensure there's enough buffer left for header + length field
         // At this point, buffer[i] must be the start of a TLS header
         // Found a TLS header, read the length
-        uint16_t length = (buffer[i+3] << 8) | buffer[i+4];
+        uint16_t length = (buffer[i+3] << 8) | (buffer[i+4] & 0xff);
+
+	//printf("i %d buf_size %d length %d buffer[i+3] %X buffer[i+4] %X\n", i, buf_size, length,
+	//		buffer[i+3], buffer[i+4]);
 
         if (i + 5 + length > buf_size) {
             // Not enough data for the complete record
@@ -484,6 +487,9 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 			}
 			return 0;
 		}
+
+		//printf("received %d pengding %d\n", bytes_received, bytes_pending);
+		//hexdump("pending_bytes", client_data_buffer + bytes_received - bytes_pending, bytes_pending);
 
 		// scan number of tls record headers from pending bytes
 		int recv_rec_seqnum = count_tls_records(client_data_buffer + bytes_received - bytes_pending, bytes_pending);
