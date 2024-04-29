@@ -122,7 +122,7 @@ static void add_mac_to_cache(struct in_addr ip_addr, uint8_t *mac) {
 
 static int get_mac_address(const char *ifname, struct sockaddr_in addr, uint8_t *mac) {
     if (get_mac_from_cache(addr.sin_addr, mac)) {
-		printf("Mac cache hit\n");
+	printf("Mac cache hit\n");
         return 0; // MAC found in cache, return immediately
     }
 

@@ -1107,7 +1107,6 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 			migration_info->peer_addr, migration_info->peer_port,
 			migration_info->self_addr, migration_info->self_port);
 #endif
-
 #ifdef USE_TC
 		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 					migration_info->peer_port, migration_info->self_port);
