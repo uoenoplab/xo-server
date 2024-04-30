@@ -911,6 +911,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &new_window, sizeof(new_window));
 	assert(ret == 0);
 
+	printf("KTLS BUF len %d \n", migration_info->ktlsbuf.len);
 	if (migration_info->ktlsbuf.len != 0) {
 		if (migration_info->ktlsbuf.len != 2 * sizeof(struct tls12_crypto_info_aes_gcm_256)) {
 			fprintf(stderr, "incorrect ktlsbuf length (%ld)", migration_info->ktlsbuf.len);
@@ -1065,8 +1066,8 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 		if (migration_info->acting_primary_osd_id == get_my_osd_id()) {
 #ifdef DEBUG
 			printf("Thread %d HANDOFF_IN HANDOFF_BACK_REQUEST primary osd is current node, deserlize\n", in_ctx->thread_id);
-			handoff_in_deserialize(in_ctx, migration_info);
 #endif
+			handoff_in_deserialize(in_ctx, migration_info);
 		} else {
 #ifdef DEBUG
 			printf("Thread %d HANDOFF_IN HANDOFF_BACK_REQUEST primary osd not current node, special serlize to osd id %d\n",
