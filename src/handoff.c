@@ -752,13 +752,17 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 					migration_info->peer_port, migration_info->self_port,
 					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
 					migration_info->peer_port, migration_info->self_port, false, true);
+		assert(ret == 0);
+		ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+					migration_info->peer_port, migration_info->self_port);
+		assert(ret == 0);
 #else
 		ret = apply_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
 					migration_info->peer_port, migration_info->self_port,
 					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
 					migration_info->peer_port, migration_info->self_port, false);
-#endif
 		assert(ret == 0);
+#endif
 	} else {
 		// handoff back and handoff reset
 		// remove src IP modification
@@ -772,6 +776,11 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port);
 		assert(ret == 0);
+
+		// we are on fake server, we applied blocking during handoff back
+		ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+					migration_info->peer_port, migration_info->self_port);
+		assert(ret == 0);
 	}
 
 	// we don't need this for handoff_reset where fd already closed
@@ -781,11 +790,6 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
 #endif
 	// remove blocking
-#ifdef USE_TC
-	ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
-				migration_info->peer_port, migration_info->self_port);
-	assert(ret == 0);
-#endif
 	// }
 
 	tls_free_client(out_ctx->client);

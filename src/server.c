@@ -53,7 +53,7 @@ enum THREAD_EPOLL_EVENT {
 // 5.  check end of payload
 // 5.1 wait for async completion, respond http OK
 
-const size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 4;
+const size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 8;
 
 volatile sig_atomic_t server_running = 1;
 
@@ -122,7 +122,9 @@ static void add_mac_to_cache(struct in_addr ip_addr, uint8_t *mac) {
 
 static int get_mac_address(const char *ifname, struct sockaddr_in addr, uint8_t *mac) {
     if (get_mac_from_cache(addr.sin_addr, mac)) {
+#ifdef DEBUG
 	printf("Mac cache hit\n");
+#endif
         return 0; // MAC found in cache, return immediately
     }
 
@@ -184,7 +186,9 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 
 	char *ip_addr_str = inet_ntoa(client_addr.sin_addr);
 
+#ifdef DEBUG
 	printf("Thread %d: Accepted connection (%d) from %s:%d\n", thread_id, new_socket, ip_addr_str, ntohs(client_addr.sin_port));
+#endif
 
 	// Add the new client socket to the epoll event list
 
@@ -197,8 +201,10 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	int ret = get_mac_address(ifname, client_addr, client->client_mac);
 	assert(ret == 0);
 
+#ifdef DEBUG
 	printf("MAC addr of remote ip %s is ", ip_addr_str);
 	print_mac_address(client->client_mac);
+#endif
 
 	client->client_addr = client_addr.sin_addr.s_addr;
 	client->client_port = client_addr.sin_port;
