@@ -684,6 +684,12 @@ void handoff_out_send(struct handoff_out *out_ctx)
 
 static void handoff_out_send_done(struct handoff_out *out_ctx)
 {
+
+#ifdef DEBUG
+	printf("Thread %d HANDOFF_OUT send done (osd arr index %d, osd id %d)\n",
+		out_ctx->thread_id, out_ctx->osd_arr_index, osd_ids[out_ctx->osd_arr_index]);
+#endif
+
 	uint32_t magic_number = UINT32_MAX;
 	int ret = send(out_ctx->fd, &magic_number,
 		sizeof(magic_number), NULL);
@@ -1023,6 +1029,12 @@ void handoff_in_disconnect(struct handoff_in *in_ctx)
 // no need to change epoll since we will need to wait for new migration request
 // anyways
 static void handoff_in_recv_done(struct handoff_in *in_ctx) {
+
+#ifdef DEBUG
+	printf("Thread %d HANDOFF_IN recv done (osd arr index %d, osd id %d)\n",
+		in_ctx->thread_id, in_ctx->osd_arr_index, osd_ids[in_ctx->osd_arr_index]);
+#endif
+
 	struct http_client *client = in_ctx->client_for_originaldone;
 
 	struct epoll_event event = {};
@@ -1054,7 +1066,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 	if (in_ctx->recv_protobuf == NULL) {
 		int ret = recv(in_ctx->fd, &in_ctx->recv_protobuf_len, sizeof(in_ctx->recv_protobuf_len), 0);
 		if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
-			perror("handoff_in_recv recv");
+			fprintf(stderr, "handoff_in_recv recv1: %s", strerror(errno));
 			handoff_in_disconnect(in_ctx);
 			return;
 		}
@@ -1101,7 +1113,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 	int ret = recv(in_ctx->fd, in_ctx->recv_protobuf + in_ctx->recv_protobuf_received,
 		in_ctx->recv_protobuf_len - in_ctx->recv_protobuf_received, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
-		perror("handoff_in_recv recv");
+		fprintf(stderr, "handoff_in_recv recv2: %s", strerror(errno));
 		handoff_in_disconnect(in_ctx);
 		return;
 	}

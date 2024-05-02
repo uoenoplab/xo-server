@@ -18,7 +18,6 @@
 #include <fcntl.h>
 #include <ini.h>
 #include <netinet/tcp.h>
-#include <sys/eventfd.h>
 #include <net/if_arp.h>
 
 #include "http_client.h"
@@ -69,7 +68,8 @@ struct thread_param {
 	int thread_id;
 	// int server_fd;
 	rados_t cluster;
-	int handoff_in_eventfd;
+	int handoff_in_readfd;
+	int handoff_in_writefd;
 	char ifname[32];
 };
 
@@ -348,7 +348,7 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 
 static void *conn_wait(void *arg)
 {
-	// we also need a dummy handoff_in_ctx for eventfd
+	// we also need a dummy handoff_in_ctx for readfd
 	struct handoff_in handoff_in_ctxs[num_osds];
 	struct handoff_out handoff_out_ctxs[num_peers];
 	memset(handoff_in_ctxs, 0, sizeof(handoff_in_ctxs));
@@ -398,15 +398,15 @@ static void *conn_wait(void *arg)
 
 #ifdef USE_MIGRATION
 	if (enable_migration) {
-		// Add handoff_in eventfd into epoll
+		// Add handoff_in read_domain_socket into epoll
 		memset(&event, 0 , sizeof(event));
 		handoff_in_ctxs[num_osds - 1].epoll_data_u32 = HANDOFF_IN_EVENT;
 		handoff_in_ctxs[num_osds - 1].epoll_fd = epoll_fd;
-		handoff_in_ctxs[num_osds - 1].fd = param->handoff_in_eventfd;
+		handoff_in_ctxs[num_osds - 1].fd = param->handoff_in_readfd;
 		event.events = EPOLLIN;
 		event.data.ptr = &handoff_in_ctxs[num_osds - 1];
-		printf("Thread %d HANDOFF_IN regiester eventfd %d\n", param->thread_id, param->handoff_in_eventfd);
-		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_eventfd, &event) == -1) {
+		printf("Thread %d HANDOFF_IN regiester readfd %d\n", param->thread_id, param->handoff_in_readfd);
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_readfd, &event) == -1) {
 			perror("epoll_ctl: efd");
 			exit(EXIT_FAILURE);
 		}
@@ -453,8 +453,8 @@ static void *conn_wait(void *arg)
 	ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event);
 	assert(ret == 0);
 
-	printf("Thread %d HANDOFF_IN Ready to get accepted connections from main thread on eventfd %d\n",
-		param->thread_id, param->handoff_in_eventfd);
+	printf("Thread %d HANDOFF_IN Ready to get accepted connections from main thread on readfd %d\n",
+		param->thread_id, param->handoff_in_readfd);
 	printf("Thread %d S3_HTTP Ready to accept connections on fd %d port %d\n",
 		param->thread_id, S3_HTTP_PORT, server_fd);
 	while (server_running) {
@@ -531,16 +531,16 @@ static void *conn_wait(void *arg)
 				struct handoff_in *in_ctx = (struct handoff_in *)events[i].data.ptr;
 				in_ctx->data_io_ctx = data_io_ctx;
 				in_ctx->bucket_io_ctx = bucket_io_ctx;
-				if (in_ctx->fd == param->handoff_in_eventfd) {
+				if (in_ctx->fd == param->handoff_in_readfd) {
 #ifdef DEBUG
-					printf("HANDOFF_IN_EVENT handoff_in_eventfd\n");
+					printf("HANDOFF_IN_EVENT handoff_in_readfd\n");
 #endif
 					if (events[i].events & EPOLLIN) {
 						uint64_t val;
 						int in_fd, osd_arr_index;
-						ret = read(param->handoff_in_eventfd, &val, sizeof(val));
+						ret = read(param->handoff_in_readfd, &val, sizeof(val));
 						if (ret != sizeof(val)) {
-							perror("read eventfd");
+							perror("read readfd");
 							exit(EXIT_FAILURE);
 						}
 						split_uint64_to_ints(val, &in_fd, &osd_arr_index);
@@ -550,8 +550,8 @@ static void *conn_wait(void *arg)
 								param->thread_id, in_fd, osd_ids[osd_arr_index]);
 						} else {
 							// main thread will close old fd and cause global epoll list delete
-							printf("Thread %d HANDOFF_IN receives a new conn %d and overwrites old conn (osd id %d)\n",
-								param->thread_id, in_fd, osd_ids[osd_arr_index]);
+							printf("Thread %d HANDOFF_IN receives a new conn %d and overwrites old conn %d (osd id %d)\n",
+								param->thread_id, in_fd, handoff_in_ctxs[osd_arr_index].fd, osd_ids[osd_arr_index]);
 						}
 #endif
 						handoff_in_ctxs[osd_arr_index].fd = in_fd;
@@ -572,7 +572,7 @@ static void *conn_wait(void *arg)
 					}
 #ifdef DEBUG
 					else {
-						printf("Thread %d HANDOFF_IN unhanlded event on eventfd (events %d)\n",
+						printf("Thread %d HANDOFF_IN unhanlded event on handoff_in_readfd (events %d)\n",
 							param->thread_id, events[i].events);
 					}
 #endif
@@ -586,7 +586,7 @@ static void *conn_wait(void *arg)
 #endif
 					handoff_in_disconnect(in_ctx);
 					// We don't handle recv state here since all we can do is
-					// wait main thread accept then trigger eventfd
+					// wait main thread accept then trigger readfd
 				} else if (events[i].events & EPOLLIN) {
 #ifdef DEBUG
 					printf("HANDOFF_IN_EVENT handoff_in_recv\n");
@@ -594,8 +594,10 @@ static void *conn_wait(void *arg)
 					bool ready_to_send = false;
 					struct http_client *client_to_handoff_again = NULL;
 					handoff_in_recv(in_ctx, &ready_to_send, &client_to_handoff_again);
-					if (ready_to_send)
+					if (ready_to_send) {
+						printf("HANDOFF_IN_EVENT handoff_in_send\n");
 						handoff_in_send(in_ctx);
+					}
 					if (client_to_handoff_again) {
 #ifdef DEBUG
 						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
@@ -917,9 +919,9 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 #endif
 					// printf("combine_ints_to_uint64(in_fd %d, osd_arr_index %d)\n", in_fd, osd_arr_index);
 					uint64_t val = combine_ints_to_uint64(in_fd, osd_arr_index);
-					int ret = write(params[thread_id].handoff_in_eventfd, &val, sizeof(val));
+					int ret = write(params[thread_id].handoff_in_writefd, &val, sizeof(val));
 					if (ret != sizeof(uint64_t)) {
-						perror("write eventfd");
+						perror("handoff_in_writefd write");
 						exit(EXIT_FAILURE);
 					}
 					struct epoll_event event = {0};
@@ -1062,12 +1064,14 @@ int main(int argc, char *argv[])
 		param[i].thread_id = i;
 		//param[i].server_fd = server_fd;
 		param[i].cluster = cluster;
-		param[i].handoff_in_eventfd = eventfd(0, 0);
-		strncpy(param[i].ifname, ifname, 32);
-		if (param[i].handoff_in_eventfd == -1) {
-			perror("eventfd");
-			exit(EXIT_FAILURE);
+		int socks[2];
+		if (socketpair(AF_UNIX, SOCK_STREAM, 0, socks) == -1) {
+			perror("socketpair");
+			exit(1);
 		}
+		param[i].handoff_in_writefd = socks[0];
+		param[i].handoff_in_readfd = socks[1];
+		strncpy(param[i].ifname, ifname, 32);
 
 		CPU_ZERO(&cpus);
 		CPU_SET((i + max_cores) % max_cores, &cpus);
@@ -1100,7 +1104,8 @@ int main(int argc, char *argv[])
 			exit(1);
 		}
 
-		close(param[i].handoff_in_eventfd);
+		close(param[i].handoff_in_writefd);
+		close(param[i].handoff_in_readfd);
 	}
 	printf("all thread killed\n");
 
