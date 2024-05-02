@@ -25,6 +25,7 @@
 enum {
         HANDOFF_REQUEST,
         HANDOFF_BACK_REQUEST,
+        HANDOFF_RESET_REQUEST,
         HANDOFF_DONE
 };
 
@@ -43,21 +44,25 @@ struct handoff_in {
 	rados_ioctx_t data_io_ctx;
 	rados_ioctx_t bucket_io_ctx;
         struct http_client *client_to_handoff_again;
+        bool wait_for_originaldone;
+        struct http_client *client_for_originaldone;
 };
 
 struct handoff_out_req;
 
 struct handoff_out_queue {
+    int num_requests;
     struct handoff_out_req* front;
     struct handoff_out_req* rear;
 };
 
-#define MAX_HANDOFF_OUT_RECONNECT 10
+#define MAX_HANDOFF_OUT_RECONNECT 5
 
 struct handoff_out {
 	uint32_t epoll_data_u32;
 	int epoll_fd;
 	int fd;
+        bool is_fd_connected;
         bool is_fd_in_epoll;
         int reconnect_count;
         int osd_arr_index;
@@ -70,15 +75,21 @@ struct handoff_out {
         uint32_t recv_protobuf_received;
 };
 
+void handoff_out_serialize_reset(struct http_client *client);
+void handoff_out_serialize(struct http_client *client);
+
 void handoff_out_connect(struct handoff_out *out_ctx);
 void handoff_out_reconnect(struct handoff_out *out_ctx);
 void handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
-	struct handoff_out *out_ctx, int osd_arr_index, int thread_id, bool serialize, bool urgent);
+	struct handoff_out *out_ctx, int osd_arr_index, int thread_id);
+void handoff_out_issue_urgent(int epoll_fd, uint32_t epoll_data_u32, struct http_client *client,
+	struct handoff_out *out_ctx, int osd_arr_index, int thread_id);
 void handoff_out_send(struct handoff_out *out_ctx);
 void handoff_out_recv(struct handoff_out *out_ctx);
 
 void handoff_in_disconnect(struct handoff_in *in_ctx);
-void handoff_in_recv(struct handoff_in *in_ctx);
-void handoff_in_send(struct handoff_in *in_ctx, struct http_client **client_to_handoff_again);
+void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send,
+        struct http_client **client_to_handoff_again);
+void handoff_in_send(struct handoff_in *in_ctx);
 
 #endif

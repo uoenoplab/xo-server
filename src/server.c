@@ -18,7 +18,6 @@
 #include <fcntl.h>
 #include <ini.h>
 #include <netinet/tcp.h>
-#include <sys/eventfd.h>
 #include <net/if_arp.h>
 
 #include "http_client.h"
@@ -69,7 +68,8 @@ struct thread_param {
 	int thread_id;
 	// int server_fd;
 	rados_t cluster;
-	int handoff_in_eventfd;
+	int handoff_in_readfd;
+	int handoff_in_writefd;
 	char ifname[32];
 };
 
@@ -88,47 +88,69 @@ void handleCtrlC(int signum)
 	server_running = 0; // Set the flag to stop the server gracefully.
 }
 
-// Function to get MAC address from IP
-static int get_mac_address(const char *ifname, const char *ip_address, uint8_t *mac) {
-	struct arpreq arp_req;
-	struct sockaddr_in *sin;
-	int sock_fd;
 
-	memset(&arp_req, 0, sizeof(struct arpreq));
-	sin = (struct sockaddr_in *)&arp_req.arp_pa;
-	sin->sin_family = AF_INET;
+#define MAC_CACHE_SIZE 10  // Smaller cache for simplicity
 
-	// Convert IP string to network format
-	if (inet_pton(AF_INET, ip_address, &sin->sin_addr) != 1) {
-		perror("inet_pton failed");
-		return -1;
-	}
+struct cache_entry {
+    struct in_addr ip_addr; // IP address
+    uint8_t mac[6];         // MAC address
+    int valid;              // Validity flag to check if entry is used
+};
 
-	// Create a socket to communicate with the kernel
-	if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-		perror("socket failed");
-		return -1;
-	}
+struct cache_entry mac_cache[MAC_CACHE_SIZE] = {0};  // Cache initialization
 
-	// Copy the interface name to the request
-	strncpy(arp_req.arp_dev, ifname, IFNAMSIZ-1);
-
-	// Query the kernel for the hardware (MAC) address
-	if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
-		perror("ioctl SIOCGARP failed");
-		close(sock_fd);
-		return -1;
-	}
-
-	// Extract the MAC address from the reply
-	memcpy(mac, arp_req.arp_ha.sa_data, sizeof(uint8_t) * 6);
-	printf("MAC addr of remote ip %s is ", ip_address);
-	print_mac_address(mac);
-
-	close(sock_fd);
-	return 0;
+static int get_mac_from_cache(struct in_addr ip_addr, uint8_t *mac) {
+    for (int i = 0; i < MAC_CACHE_SIZE; i++) {
+        if (mac_cache[i].valid && mac_cache[i].ip_addr.s_addr == ip_addr.s_addr) {
+            memcpy(mac, mac_cache[i].mac, sizeof(mac));
+            return 1; // MAC found in cache
+        }
+    }
+    return 0; // Not found
 }
 
+static void add_mac_to_cache(struct in_addr ip_addr, uint8_t *mac) {
+    for (int i = 0; i < MAC_CACHE_SIZE; i++) {
+        if (!mac_cache[i].valid) {  // Check for the first unused spot
+            mac_cache[i].ip_addr = ip_addr;
+            memcpy(mac_cache[i].mac, mac, sizeof(mac_cache[i].mac));
+            mac_cache[i].valid = 1;
+            return;
+        }
+    }
+}
+
+static int get_mac_address(const char *ifname, struct sockaddr_in addr, uint8_t *mac) {
+    if (get_mac_from_cache(addr.sin_addr, mac)) {
+	printf("Mac cache hit\n");
+        return 0; // MAC found in cache, return immediately
+    }
+
+    struct arpreq arp_req;
+    int sock_fd;
+    memset(&arp_req, 0, sizeof(struct arpreq));
+    struct sockaddr_in *sin = (struct sockaddr_in *)&arp_req.arp_pa;
+    sin->sin_family = AF_INET;
+    sin->sin_addr = addr.sin_addr;
+
+    if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        perror("socket failed");
+        return -1;
+    }
+
+    strncpy(arp_req.arp_dev, ifname, IFNAMSIZ-1);
+    if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
+        perror("ioctl SIOCGARP failed");
+        close(sock_fd);
+        return -1;
+    }
+
+    memcpy(mac, arp_req.arp_ha.sa_data, sizeof(uint8_t) * 6);
+    add_mac_to_cache(addr.sin_addr, mac); // Add to cache
+
+    close(sock_fd);
+    return 0;
+}
 
 void set_socket_non_blocking(int socket_fd)
 {
@@ -160,34 +182,62 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 		return;
 	}
 
-	printf("Thread %d: Accepted connection (%d) from %s:%d\n", thread_id, new_socket, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+	char *ip_addr_str = inet_ntoa(client_addr.sin_addr);
+
+	printf("Thread %d: Accepted connection (%d) from %s:%d\n", thread_id, new_socket, ip_addr_str, ntohs(client_addr.sin_port));
 
 	// Add the new client socket to the epoll event list
 
 	struct epoll_event event;
-	event.events = EPOLLIN;
+	event.events = EPOLLIN | EPOLLRDHUP;
 	struct http_client *client = create_http_client(epoll_fd, new_socket);
 	client->epoll_data_u32 = S3_HTTP_EVENT;
-	int ret = get_mac_address(ifname, inet_ntoa(client_addr.sin_addr), client->client_mac);
+
+	// TODO: optimize
+	int ret = get_mac_address(ifname, client_addr, client->client_mac);
 	assert(ret == 0);
+
+	printf("MAC addr of remote ip %s is ", ip_addr_str);
+	print_mac_address(client->client_mac);
+
+	client->client_addr = client_addr.sin_addr.s_addr;
+	client->client_port = client_addr.sin_port;
+
 	event.data.ptr = client;
 
 	set_socket_non_blocking(new_socket);
 
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &event) == -1) {
-		perror("epoll_ctl");
+		perror("handle_new_connection: epoll_ctl");
 		close(new_socket);
 		free_http_client(client);
 	}
 }
 
-void handle_client_disconnect(int epoll_fd, struct http_client *client)
+void handle_client_disconnect(int epoll_fd, struct http_client *client,
+	int thread_id, struct handoff_out *handoff_out_ctxs)
 {
 	int fd = client->fd;
-	// Remove the client socket from the epoll event list
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL) == -1) {
-		perror("epoll_ctl");
+	int ret = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+	assert(ret == 0);
+
+	printf("Thread %d client disconnected %d\n", thread_id, fd);
+
+#ifdef USE_MIGRATION
+	// we don't free up client since we still need it for handoff_reset
+	if (client->from_migrate != -1) {
+#ifdef DEBUG
+		printf("Thread %d HANDOFF_OUT create handoff reset client to osd id %d on conn %d\n",
+			thread_id, client->from_migrate, client->fd);
+#endif
+		handoff_out_serialize_reset(client);
+		int osd_arr_index = get_arr_index_from_osd_id(client->from_migrate);
+		handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client,
+			&handoff_out_ctxs[osd_arr_index], osd_arr_index, thread_id);
+		return;
 	}
+#endif
+
 	close(fd);
 	tls_free_client(client);
 	free_http_client(client);
@@ -264,17 +314,20 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 	if (bytes_received <= 0) {
 		// Client closed the connection or an error occurred
 		if (bytes_received == 0) {
-			printf("Thread %d: Client disconnected: %d\n", thread_id, client->fd);
+#ifdef DEBUG
+			fprintf(stderr, "Thread %d: conn %d recv returned 0\n", thread_id, client->fd);
+#endif
 		} else if (errno == EAGAIN && client->tls.is_ssl && client->tls.is_ktls_set) {
 			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
-			return 1;
+			return 0;
 		} else {
-			perror("recv");
+#ifdef DEBUG
+			fprintf(stderr, "Thread %d: conn %d recv returned -1 (%s)\n", thread_id, client->fd, strerror(errno));
+#endif
 		}
 
 		// Remove the client socket from the epoll event list
-		handle_client_disconnect(epoll_fd, client); // Handle client disconnection
-		return 1;
+		return -1;
 	}
 
 	if (client->tls.is_ssl){
@@ -283,7 +336,7 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 			fprintf(stderr, "%s: handle_client_data_ssl returned %ld\n", __func__, bytes_received);
 			exit(EXIT_FAILURE);
 		}
-		if (bytes_received == 0) return 1;
+		if (bytes_received == 0) return 0;
 	}
 
 	client->bucket_io_ctx = bucket_io_ctx;
@@ -295,7 +348,7 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 
 static void *conn_wait(void *arg)
 {
-	// we also need a dummy handoff_in_ctx for eventfd
+	// we also need a dummy handoff_in_ctx for readfd
 	struct handoff_in handoff_in_ctxs[num_osds];
 	struct handoff_out handoff_out_ctxs[num_peers];
 	memset(handoff_in_ctxs, 0, sizeof(handoff_in_ctxs));
@@ -345,15 +398,15 @@ static void *conn_wait(void *arg)
 
 #ifdef USE_MIGRATION
 	if (enable_migration) {
-		// Add handoff_in eventfd into epoll
+		// Add handoff_in read_domain_socket into epoll
 		memset(&event, 0 , sizeof(event));
 		handoff_in_ctxs[num_osds - 1].epoll_data_u32 = HANDOFF_IN_EVENT;
 		handoff_in_ctxs[num_osds - 1].epoll_fd = epoll_fd;
-		handoff_in_ctxs[num_osds - 1].fd = param->handoff_in_eventfd;
+		handoff_in_ctxs[num_osds - 1].fd = param->handoff_in_readfd;
 		event.events = EPOLLIN;
 		event.data.ptr = &handoff_in_ctxs[num_osds - 1];
-		printf("Thread %d HANDOFF_IN regiester eventfd %d\n", param->thread_id, param->handoff_in_eventfd);
-		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_eventfd, &event) == -1) {
+		printf("Thread %d HANDOFF_IN regiester readfd %d\n", param->thread_id, param->handoff_in_readfd);
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_readfd, &event) == -1) {
 			perror("epoll_ctl: efd");
 			exit(EXIT_FAILURE);
 		}
@@ -397,13 +450,11 @@ static void *conn_wait(void *arg)
 	struct http_client *server_client = create_http_client(epoll_fd, server_fd);
 	server_client->epoll_data_u32 = S3_HTTP_EVENT;
 	event.data.ptr = server_client;
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
-		perror("epoll_ctl");
-		exit(EXIT_FAILURE);
-	}
+	ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event);
+	assert(ret == 0);
 
-	printf("Thread %d HANDOFF_IN Ready to get accepted connections from main thread on eventfd %d\n",
-		param->thread_id, param->handoff_in_eventfd);
+	printf("Thread %d HANDOFF_IN Ready to get accepted connections from main thread on readfd %d\n",
+		param->thread_id, param->handoff_in_readfd);
 	printf("Thread %d S3_HTTP Ready to accept connections on fd %d port %d\n",
 		param->thread_id, S3_HTTP_PORT, server_fd);
 	while (server_running) {
@@ -427,24 +478,50 @@ static void *conn_wait(void *arg)
 				// Handle events using callback functions
 				struct http_client *c = (struct http_client *)events[i].data.ptr;
 				if (c->fd == server_fd) {
+#ifdef DEBUG
+					printf("S3_HTTP_EVENT handle_new_connection\n");
+#endif
 					handle_new_connection(epoll_fd, param->ifname, server_fd, thread_id);
-				}
-				else if (events[i].events & EPOLLOUT) {
-					send_client_data(c);
-				}
-				else if (events[i].events & EPOLLIN) {
+				} else if ((events[i].events & EPOLLERR) ||
+						   (events[i].events & EPOLLHUP) ||
+						   (events[i].events & EPOLLRDHUP)) {
+					fprintf(stderr, "Thread %d S3_HTTP error event (fd %d events %d)\n",
+						param->thread_id, c->fd, events[i].events);
+					handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
+				} else if (events[i].events & EPOLLOUT) {
+#ifdef DEBUG
+					printf("S3_HTTP_EVENT send_client_data c->fd %d\n", c->fd);
+#endif
+					ret = send_client_data(c);
+					if (ret == -1) {
+						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
+					}
+				} else if (events[i].events & EPOLLIN) {
+#ifdef DEBUG
+					printf("S3_HTTP_EVENT handle_client_data\n");
+#endif
 					ret = handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
+					if (ret == -1) {
+						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
+					}
 #ifdef USE_MIGRATION
 					// check if ret okay, connection could be closed
-					if (enable_migration && ret == 0 && c->to_migrate != -1) {
+					if (ret != -1 && enable_migration && c->to_migrate != -1) {
+#ifdef DEBUG
 						printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
 							param->thread_id, c->fd, c->to_migrate);
+#endif
+						handoff_out_serialize(c);
+#ifdef DEBUG
+						printf("Thread %d HANDOFF_OUT serialized client on conn %d\n", param->thread_id, c->fd);
+#endif
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
-							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id, true, false);
+							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
 					}
 #endif
-				} else {
+				}
+				else {
 					fprintf(stderr, "Thread %d S3_HTTP unhandled event (fd %d events %d)\n",
 						param->thread_id, c->fd, events[i].events);
 				}
@@ -454,24 +531,29 @@ static void *conn_wait(void *arg)
 				struct handoff_in *in_ctx = (struct handoff_in *)events[i].data.ptr;
 				in_ctx->data_io_ctx = data_io_ctx;
 				in_ctx->bucket_io_ctx = bucket_io_ctx;
-				if (in_ctx->fd == param->handoff_in_eventfd) {
+				if (in_ctx->fd == param->handoff_in_readfd) {
+#ifdef DEBUG
+					printf("HANDOFF_IN_EVENT handoff_in_readfd\n");
+#endif
 					if (events[i].events & EPOLLIN) {
 						uint64_t val;
 						int in_fd, osd_arr_index;
-						ret = read(param->handoff_in_eventfd, &val, sizeof(val));
+						ret = read(param->handoff_in_readfd, &val, sizeof(val));
 						if (ret != sizeof(val)) {
-							perror("read eventfd");
+							perror("read readfd");
 							exit(EXIT_FAILURE);
 						}
 						split_uint64_to_ints(val, &in_fd, &osd_arr_index);
+#ifdef DEBUG
 						if (handoff_in_ctxs[osd_arr_index].fd == 0) {
 							printf("Thread %d HANDOFF_IN receives a new conn %d (osd id %d)\n",
 								param->thread_id, in_fd, osd_ids[osd_arr_index]);
 						} else {
 							// main thread will close old fd and cause global epoll list delete
-							printf("Thread %d HANDOFF_IN receives a new conn %d and overwrites old conn (osd id %d)\n",
-								param->thread_id, in_fd, osd_ids[osd_arr_index]);
+							printf("Thread %d HANDOFF_IN receives a new conn %d and overwrites old conn %d (osd id %d)\n",
+								param->thread_id, in_fd, handoff_in_ctxs[osd_arr_index].fd, osd_ids[osd_arr_index]);
 						}
+#endif
 						handoff_in_ctxs[osd_arr_index].fd = in_fd;
 						handoff_in_ctxs[osd_arr_index].epoll_fd = epoll_fd;
 						handoff_in_ctxs[osd_arr_index].osd_arr_index = osd_arr_index;
@@ -485,37 +567,55 @@ static void *conn_wait(void *arg)
 							event.events = EPOLLOUT;
 						}
 						event.data.ptr = &handoff_in_ctxs[osd_arr_index];
-						if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event) == -1) {
-							perror("epoll_ctl");
-							exit(EXIT_FAILURE);
-						}
-					} else {
-						printf("Thread %d HANDOFF_IN unhanlded event on eventfd (events %d)\n",
+						ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event);
+						assert(ret == 0);
+					}
+#ifdef DEBUG
+					else {
+						printf("Thread %d HANDOFF_IN unhanlded event on handoff_in_readfd (events %d)\n",
 							param->thread_id, events[i].events);
 					}
+#endif
 				} else if ((events[i].events & EPOLLERR) ||
 						   (events[i].events & EPOLLHUP) ||
 						   (events[i].events & EPOLLRDHUP)){
+#ifdef DEBUG
 					fprintf(stderr, "Thread %d HANDOFF_IN received err/hup event"
 						"on conn %d, drop this conn (events %d osd id %d)\n",
 						param->thread_id, in_ctx->fd, events[i].events, osd_ids[in_ctx->osd_arr_index]);
+#endif
 					handoff_in_disconnect(in_ctx);
 					// We don't handle recv state here since all we can do is
-					// wait main thread accept then trigger eventfd
+					// wait main thread accept then trigger readfd
 				} else if (events[i].events & EPOLLIN) {
-					handoff_in_recv(in_ctx);
-				} else if (events[i].events & EPOLLOUT) {
+#ifdef DEBUG
+					printf("HANDOFF_IN_EVENT handoff_in_recv\n");
+#endif
+					bool ready_to_send = false;
 					struct http_client *client_to_handoff_again = NULL;
-					handoff_in_send(in_ctx, &client_to_handoff_again);
-					printf("client_to_handoff_again %p\n", client_to_handoff_again);
-					if (client_to_handoff_again) {
-						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
-							param->thread_id, client_to_handoff_again->to_migrate);	
-						int osd_arr_index = get_arr_index_from_osd_id(client_to_handoff_again->to_migrate);
-						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
-							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id, false, true);
+					handoff_in_recv(in_ctx, &ready_to_send, &client_to_handoff_again);
+					if (ready_to_send) {
+#ifdef DEBUG
+						printf("HANDOFF_IN_EVENT handoff_in_send\n");
+#endif
+						handoff_in_send(in_ctx);
 					}
-				} else {
+					if (client_to_handoff_again) {
+#ifdef DEBUG
+						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
+							param->thread_id, client_to_handoff_again->to_migrate);
+#endif
+						int osd_arr_index = get_arr_index_from_osd_id(client_to_handoff_again->to_migrate);
+						handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
+							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
+					}
+				} else if (events[i].events & EPOLLOUT) {
+#ifdef DEBUG
+					printf("HANDOFF_IN_EVENT handoff_in_send\n");
+#endif
+					handoff_in_send(in_ctx);
+				}
+				else {
 					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",
 						param->thread_id, in_ctx->fd, events[i].events);
 				}
@@ -524,15 +624,24 @@ static void *conn_wait(void *arg)
 				if ((events[i].events & EPOLLERR) ||
 					(events[i].events & EPOLLHUP) ||
 					(events[i].events & EPOLLRDHUP)) {
+#ifdef DEBUG
+					printf("HANDOFF_OUT_EVENT handoff_out_reconnect\n");
+#endif
 					// means current connection is broken
 					handoff_out_reconnect(out_ctx);
 				} else if (events[i].events & EPOLLOUT) {
+#ifdef DEBUG
+					printf("HANDOFF_OUT_EVENT handoff_out_send\n");
+#endif
 					handoff_out_send(out_ctx);
 				} else if (events[i].events & EPOLLIN) {
+#ifdef DEBUG
+					printf("HANDOFF_OUT_EVENT handoff_out_recv\n");
+#endif
 					// handle handoff response, if all received, then swtich back to epollout
-					printf("invoke handoff_out_recv\n");
 					handoff_out_recv(out_ctx);
-				} else {
+				}
+				else {
 					fprintf(stderr, "Thread %d HANDOFF_OUT unhandled event (fd %d events %d)\n",
 						param->thread_id, events[i].data.fd, events[i].events);
 				}
@@ -555,6 +664,8 @@ static void *conn_wait(void *arg)
 
 	rados_ioctx_destroy(bucket_io_ctx);
 	rados_ioctx_destroy(data_io_ctx);
+
+	free(client_data_buffer);
 
 	return NULL;
 }
@@ -699,10 +810,8 @@ int handoff_server_create_epoll(int listen_fd)
 	struct epoll_event event = {0};
 	event.data.fd = listen_fd;
 	event.events = EPOLLIN;
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event) == -1) {
-		perror("epoll_ctl");
-		return -1;
-	}
+	int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event);
+	assert(ret == 0);
 
 	return epoll_fd;
 }
@@ -718,9 +827,15 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 	printf("Ready to receive handoff_in connections on port %d\n", HANDOFF_CTRL_PORT);
 	while (server_running) {
 		nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-		if (nfds == -1 && errno != EINTR) {
-			perror("epoll_wait");
-			exit(EXIT_FAILURE);
+		if (nfds == -1) {
+			if (errno == EINTR) {
+				//printf("EINTR\n");
+				continue;
+			}
+			else {
+				perror("epoll_wait: handoff_server_loop");
+				exit(EXIT_FAILURE);
+			}
 		}
 
 		for (n = 0; n < nfds; n++) {
@@ -770,8 +885,9 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 				}
 
 				int i = -1;
-				for (; i < num_peers; i++) {
-					if (osd_addrs[i].sin_addr.s_addr == in_addr.sin_addr.s_addr) {
+				for (int j = 0; j < num_peers; j++) {
+					if (osd_addrs[j].sin_addr.s_addr == in_addr.sin_addr.s_addr) {
+						i = j;
 						break;
 					}
 				}
@@ -780,7 +896,7 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 					printf("Accepted handoff_in fd %d (host %s, port %d, osd_id %d)\n",
 						in_fd, osd_addr_strs[i], ntohs(in_addr.sin_port), osd_ids[i]);
 				} else {
-					printf("Unkown handoff_in client, not in osd list, drop\n");
+					printf("Unkown handoff_in client %s, not in osd list, drop\n", inet_ntoa(in_addr.sin_addr));
 					close(in_fd);
 					exit(EXIT_FAILURE);
 				}
@@ -800,27 +916,29 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 				if (thread_id != -1) {
 					set_socket_non_blocking(in_fd);
 					handoff_in_fds[thread_id][osd_arr_index] = in_fd;
+#ifdef DEBUG
 					printf("Dispatch conn %d to thread %d\n", in_fd, thread_id);
+#endif
 					// printf("combine_ints_to_uint64(in_fd %d, osd_arr_index %d)\n", in_fd, osd_arr_index);
 					uint64_t val = combine_ints_to_uint64(in_fd, osd_arr_index);
-					int ret = write(params[thread_id].handoff_in_eventfd, &val, sizeof(val));
+					int ret = write(params[thread_id].handoff_in_writefd, &val, sizeof(val));
 					if (ret != sizeof(uint64_t)) {
-						perror("write eventfd");
+						perror("handoff_in_writefd write");
 						exit(EXIT_FAILURE);
 					}
 					struct epoll_event event = {0};
 					event.data.fd = in_fd;
 					event.events = EPOLLRDHUP;
-					if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event) == -1) {
-						perror("epoll_ctl");
-						exit(EXIT_FAILURE);
-					}
+					ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event);
+					assert(ret == 0);
 				} else {
 					// TODO: we should actually scan all handoff_in_ctxs here to
 					// check is any disconnect before this, otherwise cient
 					// shouldn't send a new connection?
+#ifdef DEBUG
 					printf("Redundant conn fd %d (host %s, port %d, osd_id %d)\n",
 						in_fd, osd_addr_strs[osd_arr_index], ntohs(in_addr.sin_port), osd_arr_index);
+#endif
 					close(in_fd);
 				}
 			} else {
@@ -831,6 +949,7 @@ void handoff_server_loop(int epoll_fd, int listen_fd, struct thread_param params
 
 	close(epoll_fd);
 	close(listen_fd);
+	printf("handoff loop terminating\n");
 }
 
 int main(int argc, char *argv[])
@@ -838,6 +957,8 @@ int main(int argc, char *argv[])
 	rados_t cluster;
 	struct sigaction sa;
 	int err;
+
+	signal(SIGPIPE, SIG_IGN);
 
 #if USE_MIGRATION
 	if (argc != 4) {
@@ -855,12 +976,12 @@ int main(int argc, char *argv[])
 	else
 		enable_migration = false;
 	printf("Connection migration: %s\n", enable_migration ? "enabled" : "disabled");
-#endif
 
 	// initialize libforward-tc
 	err = init_forward(argv[1], "ingress", "1:");
 	assert(err >= 0);
 
+#endif
 	err = tls_init();
 	if (err < 0) {
 		fprintf(stderr, "%s: cannot init openssl\n", __func__);
@@ -930,6 +1051,7 @@ int main(int argc, char *argv[])
 
 	sigemptyset(&sigmask);
 	sigaddset(&sigmask, SIGINT);
+	sigaddset(&sigmask, SIGPIPE);
 
 	pthread_attr_init(&attr);
 
@@ -944,12 +1066,14 @@ int main(int argc, char *argv[])
 		param[i].thread_id = i;
 		//param[i].server_fd = server_fd;
 		param[i].cluster = cluster;
-		param[i].handoff_in_eventfd = eventfd(0, 0);
-		strncpy(param[i].ifname, ifname, 32);
-		if (param[i].handoff_in_eventfd == -1) {
-			perror("eventfd");
-			exit(EXIT_FAILURE);
+		int socks[2];
+		if (socketpair(AF_UNIX, SOCK_STREAM, 0, socks) == -1) {
+			perror("socketpair");
+			exit(1);
 		}
+		param[i].handoff_in_writefd = socks[0];
+		param[i].handoff_in_readfd = socks[1];
+		strncpy(param[i].ifname, ifname, 32);
 
 		CPU_ZERO(&cpus);
 		CPU_SET((i + max_cores) % max_cores, &cpus);
@@ -982,18 +1106,24 @@ int main(int argc, char *argv[])
 			exit(1);
 		}
 
-		close(param[i].handoff_in_eventfd);
+		close(param[i].handoff_in_writefd);
+		close(param[i].handoff_in_readfd);
 	}
+	printf("all thread killed\n");
 
 	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);
+	printf("rados shutdown\n");
 
 	for (int i = 0; i < num_osds; i++) {
 		if (osd_addr_strs[i] != NULL) free(osd_addr_strs[i]);
 	}
+	printf("osd addr freed\n");
 
 	fini_forward();
+	printf("libforward freed\n");
 	fini_forward_ebpf();
+	printf("libforward ebpf freed\n");
 	printf("Server terminated!\n");
 
 	return 0;

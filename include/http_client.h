@@ -58,7 +58,8 @@ struct http_client {
 
 	ssize_t data_payload_sent;
 	ssize_t data_payload_size;
-	char *data_payload;
+	//char *data_payload;
+	char data_payload[8 * 1024 * 1024];
 
 	ssize_t response_sent;
 	ssize_t response_size;
@@ -75,7 +76,8 @@ struct http_client {
 	// https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html
 	char object_name[MAX_OBJECT_NAME_SIZE];
 
-	char *uri_str;
+	//char *uri_str;
+	char uri_str[1024];
 	size_t uri_str_len;
 	//UriUriA uri;
 
@@ -135,6 +137,9 @@ struct http_client {
 	int acting_primary_osd_id;
 	uint8_t client_mac[6];
 
+	uint32_t client_addr;
+	uint16_t client_port;
+
 	uint8_t *proto_buf;
 	uint32_t proto_buf_len; // include the uint32 header size
 	uint32_t proto_buf_sent;
@@ -156,7 +161,7 @@ void free_http_client(struct http_client *client);
 
 void aio_ack_callback(rados_completion_t comp, void *arg);
 void aio_commit_callback(rados_completion_t comp, void *arg);
-void send_client_data(struct http_client *client);
+int send_client_data(struct http_client *client);
 void send_response(struct http_client *client);
 
 #endif
