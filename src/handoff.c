@@ -900,7 +900,9 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	socklen_t new_ulen = migration_info->unsentq_len;
 	socklen_t new_len = migration_info->sendq.len - new_ulen;
 
+#ifdef DEBUG
 	printf("restore send q: new_ulen %d new_len %d recvq len %d\n", new_ulen, new_len, migration_info->recvq.len);
+#endif
 	if (new_len) {
 		ret = restore_queue(rfd, TCP_SEND_QUEUE, (const uint8_t *)migration_info->sendq.data, new_len, 1);
 		assert(ret == 0);
@@ -943,7 +945,6 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &new_window, sizeof(new_window));
 	assert(ret == 0);
 
-	printf("client fd %d KTLS buf len %d\n", rfd, migration_info->ktlsbuf.len);
 	if (migration_info->ktlsbuf.len != 0) {
 		if (migration_info->ktlsbuf.len != 2 * sizeof(struct tls12_crypto_info_aes_gcm_256)) {
 			fprintf(stderr, "incorrect ktlsbuf length (%ld)", migration_info->ktlsbuf.len);

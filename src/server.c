@@ -595,7 +595,9 @@ static void *conn_wait(void *arg)
 					struct http_client *client_to_handoff_again = NULL;
 					handoff_in_recv(in_ctx, &ready_to_send, &client_to_handoff_again);
 					if (ready_to_send) {
+#ifdef DEBUG
 						printf("HANDOFF_IN_EVENT handoff_in_send\n");
+#endif
 						handoff_in_send(in_ctx);
 					}
 					if (client_to_handoff_again) {
