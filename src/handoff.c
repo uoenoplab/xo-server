@@ -88,6 +88,7 @@ static struct handoff_out_queue* handoff_out_queue_create() {
     if (!queue) return NULL;
 
     queue->front = queue->rear = NULL;
+    queue->num_requests = 0;
     return queue;
 }
 
@@ -98,19 +99,21 @@ static int handoff_out_queue_is_empty(struct handoff_out_queue* queue) {
 // Function to add an element to the queue
 static void handoff_out_enqueue_front(struct handoff_out_queue* queue, void *client)
 {
-    struct handoff_out_req* new_req = handoff_out_req_create(client);
-    if (!new_req) {
-        printf("Heap Overflow\n");
-        return;
-    }
+	struct handoff_out_req* new_req = handoff_out_req_create(client);
+	if (!new_req) {
+		printf("Heap Overflow\n");
+    		return;
+	}
 
-    // If queue is empty, then new node is front and rear both
-    if (queue->rear == NULL) {
-        queue->front = queue->rear = new_req;
-        return;
-    }
+	queue->num_requests++;
+	
+	// If queue is empty, then new node is front and rear both
+	if (queue->rear == NULL) {
+		queue->front = queue->rear = new_req;
+		return;
+	}
 
-    // Add the new node at the front of queue
+	// Add the new node at the front of queue
 	new_req->next = queue->front;
 	queue->front = new_req;
 }
@@ -118,35 +121,38 @@ static void handoff_out_enqueue_front(struct handoff_out_queue* queue, void *cli
 // Function to add an element to the queue
 static void handoff_out_enqueue(struct handoff_out_queue* queue, void *client)
 {
-    struct handoff_out_req* new_req = handoff_out_req_create(client);
-    if (!new_req) {
-        printf("Heap Overflow\n");
-        return;
-    }
+	struct handoff_out_req* new_req = handoff_out_req_create(client);
+	if (!new_req) {
+		printf("Heap Overflow\n");
+		return;
+	}
 
-    // If queue is empty, then new node is front and rear both
-    if (queue->rear == NULL) {
-        queue->front = queue->rear = new_req;
-        return;
-    }
+	queue->num_requests++;
+	
+	// If queue is empty, then new node is front and rear both
+	if (queue->rear == NULL) {
+		queue->front = queue->rear = new_req;
+		return;
+	}
 
-    // Add the new node at the end of queue and change rear
-    queue->rear->next = new_req;
-    queue->rear = new_req;
+	// Add the new node at the end of queue and change rear
+	queue->rear->next = new_req;
+	queue->rear = new_req;
 }
 
 // caller have to check queue is empty before dequeue!!!
 static void handoff_out_dequeue(struct handoff_out_queue* queue, void **client) {
-    struct handoff_out_req* node = queue->front;
+	struct handoff_out_req* node = queue->front;
 	*client = node->c;
 
-    queue->front = queue->front->next;
-    // If front becomes NULL, then change rear also as NULL
-    if (queue->front == NULL) {
-        queue->rear = NULL;
-    }
+	queue->front = queue->front->next;
+	// If front becomes NULL, then change rear also as NULL
+	if (queue->front == NULL) {
+		queue->rear = NULL;
+	}
 
-    free(node);
+	free(node);
+	queue->num_requests--;
 }
 
 static int
@@ -593,14 +599,14 @@ static void do_handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct h
 	if (urgent) {
 		handoff_out_enqueue_front(out_ctx->queue, client);
 #ifdef DEBUG
-		printf("Thread %d HANDOFF_OUT (front)enqueued migration work to osd id %d for s3 client conn %d\n",
-		thread_id, osd_ids[out_ctx->osd_arr_index], client->fd);
+		printf("Thread %d HANDOFF_OUT (front)enqueued (backlog %d) migration work to osd id %d for s3 client conn %d\n",
+		thread_id, out_ctx->queue->num_requests, osd_ids[out_ctx->osd_arr_index], client->fd);
 #endif
 	} else {
 		handoff_out_enqueue(out_ctx->queue, client);
 #ifdef DEBUG
-		printf("Thread %d HANDOFF_OUT enqueued migration work to osd id %d for s3 client conn %d\n",
-		thread_id, osd_ids[out_ctx->osd_arr_index], client->fd);
+		printf("Thread %d HANDOFF_OUT enqueued (backlog %d) migration work to osd id %d for s3 client conn %d\n",
+		thread_id, out_ctx->queue->num_requests, osd_ids[out_ctx->osd_arr_index], client->fd);
 #endif
 	}
 
@@ -672,8 +678,8 @@ void handoff_out_send(struct handoff_out *out_ctx)
 	}
 
 #ifdef DEBUG
-	printf("Thread %d HANDOFF_OUT dequeued migration work to osd id %d for s3 client conn %d, now start send\n",
-		out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
+	printf("Thread %d HANDOFF_OUT dequeued (backlog %d) migration work to osd id %d for s3 client conn %d, now start send\n",
+		out_ctx->thread_id, out_ctx->queue->num_requests, out_ctx->client->to_migrate, out_ctx->client->fd);
 #endif
 
 	int ret = send(out_ctx->fd, out_ctx->client->proto_buf + out_ctx->client->proto_buf_sent,
@@ -915,6 +921,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	socklen_t new_ulen = migration_info->unsentq_len;
 	socklen_t new_len = migration_info->sendq.len - new_ulen;
 
+	printf("restore send q: new_ulen %d new_len %d recvq len %d\n", new_ulen, new_len, migration_info->recvq.len);
 	if (new_len) {
 		ret = restore_queue(rfd, TCP_SEND_QUEUE, (const uint8_t *)migration_info->sendq.data, new_len, 1);
 		assert(ret == 0);
@@ -957,6 +964,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &new_window, sizeof(new_window));
 	assert(ret == 0);
 
+	printf("client fd %d KTLS buf len %d\n", rfd, migration_info->ktlsbuf.len);
 	if (migration_info->ktlsbuf.len != 0) {
 		if (migration_info->ktlsbuf.len != 2 * sizeof(struct tls12_crypto_info_aes_gcm_256)) {
 			fprintf(stderr, "incorrect ktlsbuf length (%ld)", migration_info->ktlsbuf.len);
@@ -996,6 +1004,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	}
 	memcpy(client->client_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
 
+	printf("client fd %d KTLS buf len %d\n", client->fd, migration_info->ktlsbuf.len);
 	if (migration_info->ktlsbuf.len) {
 		client->tls.is_ssl = true;
 		client->tls.is_handshake_done = true;
@@ -1052,7 +1061,8 @@ void handoff_in_disconnect(struct handoff_in *in_ctx)
 // 2. create a new http client, deserialze s3 client,
 // create connect, setup ktls
 // 3. change mod to epoll out and send back handoff done
-void handoff_in_recv(struct handoff_in *in_ctx) {
+void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send) {
+	*ready_to_send = false;
 	if (in_ctx->recv_protobuf == NULL) {
 		int ret = recv(in_ctx->fd, &in_ctx->recv_protobuf_len, sizeof(in_ctx->recv_protobuf_len), 0);
 		if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
@@ -1218,6 +1228,8 @@ void handoff_in_recv(struct handoff_in *in_ctx) {
 		perror("epoll_ctl");
 		exit(EXIT_FAILURE);
 	}
+
+	*ready_to_send = true;
 }
 
 void handoff_in_send(struct handoff_in *in_ctx, struct http_client **client_to_handoff_again) {
