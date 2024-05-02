@@ -44,6 +44,8 @@ struct handoff_in {
 	rados_ioctx_t data_io_ctx;
 	rados_ioctx_t bucket_io_ctx;
         struct http_client *client_to_handoff_again;
+        bool wait_for_originaldone;
+        struct http_client *client_for_originaldone;
 };
 
 struct handoff_out_req;
@@ -86,7 +88,8 @@ void handoff_out_send(struct handoff_out *out_ctx);
 void handoff_out_recv(struct handoff_out *out_ctx);
 
 void handoff_in_disconnect(struct handoff_in *in_ctx);
-void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send);
-void handoff_in_send(struct handoff_in *in_ctx, struct http_client **client_to_handoff_again);
+void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send,
+        struct http_client **client_to_handoff_again);
+void handoff_in_send(struct handoff_in *in_ctx);
 
 #endif
