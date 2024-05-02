@@ -254,7 +254,7 @@ static void handoff_out_serialize_rehandoff(struct http_client **client_to_hando
 	client->to_migrate = migration_info->acting_primary_osd_id;
 	client->acting_primary_osd_id = migration_info->acting_primary_osd_id;
 	client->client_addr = migration_info->peer_addr;
-	client->client_port = migration_info->peer_addr;
+	client->client_port = migration_info->peer_port;
 
 	SocketSerialize migration_info_handoff_again = *migration_info;
 
