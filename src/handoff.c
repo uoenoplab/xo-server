@@ -1026,9 +1026,9 @@ static void handoff_in_recv_done(struct handoff_in *in_ctx) {
 	struct http_client *client = in_ctx->client_for_originaldone;
 
 	struct epoll_event event = {};
-	event.data.ptr = ;
+	event.data.ptr = client;
 	event.events = EPOLLIN | EPOLLRDHUP;
-	ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
+	int ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
 	assert(ret == 0);
 
 	// check if HTTP GET
@@ -1085,7 +1085,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 			// we are waiting for original done
 			// but we didn't receive it, but a new migration
 			printf("Thread %d HANDOFF_IN new migration comes before original "
-				"server done from osd id %d\n"
+				"server done from osd id %d\n",
 				in_ctx->thread_id, osd_ids[in_ctx->osd_arr_index]);
 			exit(EXIT_FAILURE);
 		}

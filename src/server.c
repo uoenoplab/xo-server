@@ -609,7 +609,7 @@ static void *conn_wait(void *arg)
 #ifdef DEBUG
 					printf("HANDOFF_IN_EVENT handoff_in_send\n");
 #endif
-					handoff_in_send(in_ctx);`
+					handoff_in_send(in_ctx);
 				}
 				else {
 					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",
