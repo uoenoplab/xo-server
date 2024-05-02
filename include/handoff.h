@@ -44,7 +44,8 @@ struct handoff_in {
 	rados_ioctx_t data_io_ctx;
 	rados_ioctx_t bucket_io_ctx;
         struct http_client *client_to_handoff_again;
-        struct http_client *client_pending_for_originaldone;
+        bool wait_for_originaldone;
+        struct http_client *client_for_originaldone;
 };
 
 struct handoff_out_req;

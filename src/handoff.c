@@ -682,6 +682,17 @@ void handoff_out_send(struct handoff_out *out_ctx)
 	}
 }
 
+static void handoff_out_send_done(struct handoff_out *out_ctx)
+{
+	uint32_t magic_number = UINT32_MAX;
+	int ret = send(out_ctx->fd, &magic_number,
+		sizeof(magic_number), NULL);
+	if (ret != sizeof(magic_number)) {
+		printf("%s: send failed ret %d\n", __func__);
+		exit(EXIT_FAILURE);
+	}
+}
+
 void handoff_out_recv(struct handoff_out *out_ctx)
 {
 #ifdef DEBUG
@@ -804,6 +815,8 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	free_http_client(out_ctx->client);
 	out_ctx->client = NULL;
 	socket_serialize__free_unpacked(migration_info, NULL);
+
+	handoff_out_send_done(out_ctx);
 
 	if (handoff_out_queue_is_empty(out_ctx->queue)) {
 		if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_DEL, out_ctx->fd, NULL) == -1) {
@@ -987,7 +1000,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 #endif
 
 	// we only add client into epoll after originaldone received
-	in_ctx->client_pending_for_originaldone = client;
+	in_ctx->client_for_originaldone = client;
 }
 
 void handoff_in_disconnect(struct handoff_in *in_ctx)
@@ -1010,13 +1023,7 @@ void handoff_in_disconnect(struct handoff_in *in_ctx)
 // no need to change epoll since we will need to wait for new migration request
 // anyways
 static void handoff_in_recv_done(struct handoff_in *in_ctx) {
-	if (in_ctx->client_pending_for_originaldone == NULL) {
-		printf("Thread %d HANDOFF_IN error not client for originaldone (osd arr index %d, osd id %d)\n",
-		in_ctx->thread_id, in_ctx->fd, in_ctx->osd_arr_index, osd_ids[in_ctx->osd_arr_index]);
-		exit(EXIT_FAILURE);
-	}
-
-	struct http_client *client = in_ctx->client_pending_for_originaldone;
+	struct http_client *client = in_ctx->client_for_originaldone;
 
 	struct epoll_event event = {};
 	event.data.ptr = ;
@@ -1031,7 +1038,7 @@ static void handoff_in_recv_done(struct handoff_in *in_ctx) {
 	init_object_get_request(client);
 	complete_get_request(client, datetime_str);
 
-	in_ctx->client_pending_for_originaldone = NULL;
+	in_ctx->client_for_originaldone = NULL;
 }
 
 // handle handoff request - another end will not send another
@@ -1062,22 +1069,25 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 		// received original done
 		if (in_ctx->recv_protobuf_len == UINT32_MAX) {
 			ready_to_send = false; // nothing to send...
-			handoff_in_recv_done(in_ctx);
+			// this can be NULL for handoff_reset or handoff_back_rehandoff
+			if (in_ctx->client_for_originaldone != NULL)
+				handoff_in_recv_done(in_ctx);
 			if (in_ctx->client_to_handoff_again) {
 				*client_to_handoff_again = in_ctx->client_to_handoff_again;
 				in_ctx->client_to_handoff_again = NULL;
 			}
 			in_ctx->recv_protobuf_len = 0;
+			in_ctx->wait_for_originaldone = false;
 			return;
 		}
 
-		if (in_ctx->client_pending_for_originaldone) {
-			// we have a client pending means we are waiting for original done
+		if (in_ctx->wait_for_originaldone) {
+			// we are waiting for original done
 			// but we didn't receive it, but a new migration
 			printf("Thread %d HANDOFF_IN new migration comes before original "
 				"server done from osd id %d\n"
 				in_ctx->thread_id, osd_ids[in_ctx->osd_arr_index]);
-				exit(EXIT_FAILURE);
+			exit(EXIT_FAILURE);
 		}
 
 		in_ctx->recv_protobuf_len = ntohl(in_ctx->recv_protobuf_len);
@@ -1248,6 +1258,7 @@ void handoff_in_send(struct handoff_in *in_ctx) {
 	}
 	in_ctx->send_protobuf_len = 0;
 	in_ctx->send_protobuf_sent = 0;
+	in_ctx->wait_for_originaldone = true;
 	struct epoll_event event = {0};
 	event.data.ptr = in_ctx;
 	event.events = EPOLLIN;
