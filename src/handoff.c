@@ -45,15 +45,21 @@
                |             |            |
                |             |            |
                v             |            v
-       handoff_out_send------+     handoff_in_send
+       handoff_out_send------+    handoff_in_send
                                           |
                +--------------------------+
                v
        handoff_out_recv
                |
-               |
                v
     handoff_out_apply_rule
+               |
+               v
+     handoff_out_send_done
+               |
+               +--------------------------+
+                                          v
+                                  handoff_in_recv_done
 
 */
 
@@ -106,7 +112,7 @@ static void handoff_out_enqueue_front(struct handoff_out_queue* queue, void *cli
 	}
 
 	queue->num_requests++;
-	
+
 	// If queue is empty, then new node is front and rear both
 	if (queue->rear == NULL) {
 		queue->front = queue->rear = new_req;
@@ -128,7 +134,7 @@ static void handoff_out_enqueue(struct handoff_out_queue* queue, void *client)
 	}
 
 	queue->num_requests++;
-	
+
 	// If queue is empty, then new node is front and rear both
 	if (queue->rear == NULL) {
 		queue->front = queue->rear = new_req;
@@ -1016,26 +1022,18 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	client->client_addr = migration_info->peer_addr;
 	client->client_port = migration_info->peer_port;
 
+	/* quiting repair mode */
+	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
+	assert(ret == 0);
+
+	client->fd = rfd;
+
 #ifdef DEBUG
 	printf("deserialized: %s fd %d\n", client->uri_str, client->fd);
 #endif
 
-	/* quiting repair mode */
-	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
-	assert(ret == 0);
-	struct epoll_event event = {};
-	client->fd = rfd;
-	event.data.ptr = client;
-	event.events = EPOLLIN | EPOLLRDHUP;
-	ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
-	assert(ret == 0);
-
-	// check if HTTP GET
-	char datetime_str[256];
-	get_datetime_str(datetime_str, 256);
-
-	init_object_get_request(client);
-	complete_get_request(client, datetime_str);
+	// we only add client into epoll after originaldone received
+	in_ctx->client_pending_for_originaldone = client;
 }
 
 void handoff_in_disconnect(struct handoff_in *in_ctx)
@@ -1055,14 +1053,43 @@ void handoff_in_disconnect(struct handoff_in *in_ctx)
 	in_ctx->fd = 0;
 }
 
+// no need to change epoll since we will need to wait for new migration request
+// anyways
+static void handoff_in_recv_done(struct handoff_in *in_ctx) {
+	if (in_ctx->client_pending_for_originaldone == NULL) {
+		printf("Thread %d HANDOFF_IN error not client for originaldone (osd arr index %d, osd id %d)\n",
+		in_ctx->thread_id, in_ctx->fd, in_ctx->osd_arr_index, osd_ids[in_ctx->osd_arr_index]);
+		exit(EXIT_FAILURE);
+	}
+
+	struct http_client *client = in_ctx->client_pending_for_originaldone;
+
+	struct epoll_event event = {};
+	event.data.ptr = ;
+	event.events = EPOLLIN | EPOLLRDHUP;
+	ret = epoll_ctl(client->epoll_fd, EPOLL_CTL_ADD, client->fd, &event);
+	assert(ret == 0);
+
+	// check if HTTP GET
+	char datetime_str[256];
+	get_datetime_str(datetime_str, 256);
+
+	init_object_get_request(client);
+	complete_get_request(client, datetime_str);
+
+	in_ctx->client_pending_for_originaldone = NULL;
+}
+
 // handle handoff request - another end will not send another
 // request before current request is been acked
 // 1. loop until whole request received
 // 2. create a new http client, deserialze s3 client,
 // create connect, setup ktls
 // 3. change mod to epoll out and send back handoff done
-void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send) {
+void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http_client **client_to_handoff_again) {
 	*ready_to_send = false;
+	*client_to_handoff_again = NULL;
+
 	if (in_ctx->recv_protobuf == NULL) {
 		int ret = recv(in_ctx->fd, &in_ctx->recv_protobuf_len, sizeof(in_ctx->recv_protobuf_len), 0);
 		if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
@@ -1077,6 +1104,28 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send) {
 			fprintf(stderr, "%s: unable to handle the case TCP recv not equal to 4 bytes on header\n", __func__);
 			exit(EXIT_FAILURE);
 		}
+
+		// received original done
+		if (in_ctx->recv_protobuf_len == UINT32_MAX) {
+			ready_to_send = false; // nothing to send...
+			handoff_in_recv_done(in_ctx);
+			if (in_ctx->client_to_handoff_again) {
+				*client_to_handoff_again = in_ctx->client_to_handoff_again;
+				in_ctx->client_to_handoff_again = NULL;
+			}
+			in_ctx->recv_protobuf_len = 0;
+			return;
+		}
+
+		if (in_ctx->client_pending_for_originaldone) {
+			// we have a client pending means we are waiting for original done
+			// but we didn't receive it, but a new migration
+			printf("Thread %d HANDOFF_IN new migration comes before original "
+				"server done from osd id %d\n"
+				in_ctx->thread_id, osd_ids[in_ctx->osd_arr_index]);
+				exit(EXIT_FAILURE);
+		}
+
 		in_ctx->recv_protobuf_len = ntohl(in_ctx->recv_protobuf_len);
 		if (in_ctx->recv_protobuf_len == 0) {
 			fprintf(stderr, "%s: in_ctx->recv_protobuf_len is zero\n", __func__);
@@ -1232,7 +1281,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send) {
 	*ready_to_send = true;
 }
 
-void handoff_in_send(struct handoff_in *in_ctx, struct http_client **client_to_handoff_again) {
+void handoff_in_send(struct handoff_in *in_ctx) {
 	int ret = send(in_ctx->fd, in_ctx->send_protobuf + in_ctx->send_protobuf_sent,
 		in_ctx->send_protobuf_len - in_ctx->send_protobuf_sent, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
@@ -1263,10 +1312,6 @@ void handoff_in_send(struct handoff_in *in_ctx, struct http_client **client_to_h
 	}
 	in_ctx->send_protobuf_len = 0;
 	in_ctx->send_protobuf_sent = 0;
-	if (in_ctx->client_to_handoff_again) {
-		*client_to_handoff_again = in_ctx->client_to_handoff_again;
-		in_ctx->client_to_handoff_again = NULL;
-	}
 	struct epoll_event event = {0};
 	event.data.ptr = in_ctx;
 	event.events = EPOLLIN;
