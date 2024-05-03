@@ -53,7 +53,7 @@ enum THREAD_EPOLL_EVENT {
 
 const size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 4;
 
-volatile sig_atomic_t server_rhandoff_in_readfdunning = 1;
+volatile sig_atomic_t server_running = 1;
 
 char *osd_addr_strs[MAX_OSDS] = { NULL };
 struct sockaddr_in osd_addrs[MAX_OSDS];
@@ -406,11 +406,11 @@ static void *conn_wait(void *arg)
 		memset(&event, 0 , sizeof(event));
 		handoff_in_ctxs[num_osds - 1].epoll_data_u32 = HANDOFF_IN_EVENT;
 		handoff_in_ctxs[num_osds - 1].epoll_fd = epoll_fd;
-		handoff_in_ctxs[num_osds - 1].fd = param->handoff_in_listenfd;
+		handoff_in_ctxs[num_osds - 1].fd = handoff_in_listenfd;
 		event.events = EPOLLIN;
 		event.data.ptr = &handoff_in_ctxs[num_osds - 1];
 		printf("Thread %d HANDOFF_IN regiester listenfd %d\n", param->thread_id, handoff_in_listenfd);
-		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, param->handoff_in_readfd, &event) == -1) {
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, handoff_in_listenfd, &event) == -1) {
 			perror("epoll_ctl: efd");
 			exit(EXIT_FAILURE);
 		}
@@ -551,7 +551,7 @@ static void *conn_wait(void *arg)
 					if (events[i].events & EPOLLIN) {
 						struct sockaddr_in in_addr;
 						socklen_t in_len = sizeof(in_addr);
-						int in_fd = accept(listen_fd, (struct sockaddr *)&in_addr, &in_len);
+						int in_fd = accept(handoff_in_listenfd, (struct sockaddr *)&in_addr, &in_len);
 						if (in_fd == -1) {
 							perror("accept");
 							break;
@@ -620,8 +620,7 @@ static void *conn_wait(void *arg)
 					fprintf(stderr, "Thread %d HANDOFF_IN received err/hup event"
 						"on conn %d close now (events %d osd id %d)\n",
 						param->thread_id, in_ctx->fd, events[i].events, osd_ids[in_ctx->osd_arr_index]);
-					close(in_ctx->fd);
-					in_ctx->fd = 0;
+					handoff_in_disconnect(in_ctx);
 				} else if (events[i].events & EPOLLIN) {
 #ifdef DEBUG
 					printf("HANDOFF_IN_EVENT handoff_in_recv\n");
@@ -668,7 +667,7 @@ static void *conn_wait(void *arg)
 #ifdef DEBUG
 					printf("HANDOFF_OUT_EVENT handoff_out_send\n");
 #endif
-					if (out_ctx->is_is_fd_connected) {
+					if (out_ctx->is_fd_connected) {
 						handoff_out_send(out_ctx);
 					} else {
 						handoff_out_reconnect(out_ctx);

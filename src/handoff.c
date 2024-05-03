@@ -476,7 +476,7 @@ void handoff_out_connect(struct handoff_out *out_ctx) {
 	printf("Thread %d HANDOFF_OUT try connect to osd id %d (ip %s, port %d)\n",
 		out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
 		osd_addr_strs[out_ctx->osd_arr_index],
-		ntohs(osd_addrs[out_ctx->osd_arr_index].sin_port));
+		HANDOFF_CTRL_PORT + out_ctx->thread_id);
 #endif
 
 	out_ctx->fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -523,12 +523,12 @@ int handoff_out_reconnect(struct handoff_out *out_ctx) {
 		socklen_t len = sizeof(val);
 		int ret = getsockopt(out_ctx->fd, SOL_SOCKET, SO_ERROR, &val, &len);
 		if (ret != 0) {
-			fprintf(stderr, "error getting socket error code: %s\n", strerror(retval));
+			fprintf(stderr, "error getting socket error code: %s\n", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 
 		if (val != 0) {
-			fprintf(stderr, "socket error: %s\n", strerror(error));
+			fprintf(stderr, "socket error: %s\n", strerror(val));
 		} else {
 			out_ctx->is_fd_connected = true;
 			out_ctx->reconnect_count = 0;
@@ -542,7 +542,7 @@ int handoff_out_reconnect(struct handoff_out *out_ctx) {
 		fprintf(stderr, "Thread %d HANDOFF_OUT try RE-connect too many times (osd id %d, ip %s, port %d, reconnect count %d)\n",
 			out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
 			osd_addr_strs[out_ctx->osd_arr_index],
-			ntohs(osd_addrs[out_ctx->osd_arr_index].sin_port),
+			HANDOFF_CTRL_PORT + out_ctx->thread_id,
 			out_ctx->reconnect_count);
 		exit(EXIT_FAILURE);
 	}
@@ -550,15 +550,11 @@ int handoff_out_reconnect(struct handoff_out *out_ctx) {
 	printf("Thread %d HANDOFF_OUT try RE-connect (osd id %d, ip %s, port %d, reconnect count %d)\n",
 		out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
 		osd_addr_strs[out_ctx->osd_arr_index],
-		ntohs(osd_addrs[out_ctx->osd_arr_index].sin_port),
+		HANDOFF_CTRL_PORT + out_ctx->thread_id,
 		out_ctx->reconnect_count);
 
 	if (out_ctx->fd != 0) close(out_ctx->fd);
 	handoff_out_connect(out_ctx);
-
-	if (out_ctx->is_fd_connected) {
-		goto connected;
-	}
 
 	event.data.ptr = out_ctx;
 	event.events = EPOLLOUT;
@@ -568,6 +564,10 @@ int handoff_out_reconnect(struct handoff_out *out_ctx) {
 		exit(EXIT_FAILURE);
 	}
 
+	if (out_ctx->is_fd_connected) {
+		goto connected;
+	}
+
 	return -1;
 
 connected:
@@ -575,6 +575,7 @@ connected:
 	bool send = false;
 
 	if (out_ctx->client == NULL) {
+		send = true;
 	} else {
 		if (out_ctx->client->proto_buf != NULL) {
 			send = true;
@@ -582,18 +583,11 @@ connected:
 	}
 
 	if (send) {
-		event.data.ptr = out_ctx;
-		event.events = EPOLLOUT;
-		if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_ADD, out_ctx->fd, &event) == -1) {
-			perror("epoll_ctl");
-			close(out_ctx->fd);
-			exit(EXIT_FAILURE);
-		}
 		handoff_out_send(out_ctx);
 	} else {
 		event.data.ptr = out_ctx;
-		event.events = EPOLLOUT;
-		if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_ADD, out_ctx->fd, &event) == -1) {
+		event.events = EPOLLIN;
+		if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_MOD, out_ctx->fd, &event) == -1) {
 			perror("epoll_ctl");
 			close(out_ctx->fd);
 			exit(EXIT_FAILURE);
@@ -706,7 +700,7 @@ void handoff_out_send(struct handoff_out *out_ctx)
 	int ret = send(out_ctx->fd, out_ctx->client->proto_buf + out_ctx->client->proto_buf_sent,
 		out_ctx->client->proto_buf_len - out_ctx->client->proto_buf_sent, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
-		perror("handoff_out_send send");
+		fprintf(stderr, "handoff_out_send send error %d errmsg %s\n", errno, strerror(errno));
 		handoff_out_reconnect(out_ctx);
 		return;
 	}
@@ -1356,4 +1350,10 @@ void handoff_in_send(struct handoff_in *in_ctx) {
 		perror("epoll_ctl");
 		exit(EXIT_FAILURE);
 	}
+}
+
+void handoff_in_disconnect(struct handoff_in *in_ctx)
+{
+	close(in_ctx->fd);
+	in_ctx->fd = 0;
 }
