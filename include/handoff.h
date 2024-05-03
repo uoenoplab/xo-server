@@ -22,6 +22,8 @@
 #define TCPOPT_TIMESTAMP 8
 #endif
 
+#define HANDOFF_CTRL_PORT 9000
+
 enum {
         HANDOFF_REQUEST,
         HANDOFF_BACK_REQUEST,
@@ -34,7 +36,7 @@ struct handoff_in {
 	int epoll_fd;
 	int fd;
         int osd_arr_index;
-        int thread_id; // just for print stuff
+        int thread_id;
         uint8_t *recv_protobuf;
         uint32_t recv_protobuf_len;
         uint32_t recv_protobuf_received;
@@ -66,7 +68,7 @@ struct handoff_out {
         bool is_fd_in_epoll;
         int reconnect_count;
         int osd_arr_index;
-        int thread_id;  // just for print stuff
+        int thread_id;
         struct handoff_out_queue *queue;
         // handoff out request currently sending out, deququed from queue
         struct http_client *client;
@@ -87,7 +89,7 @@ void handoff_out_issue_urgent(int epoll_fd, uint32_t epoll_data_u32, struct http
 void handoff_out_send(struct handoff_out *out_ctx);
 void handoff_out_recv(struct handoff_out *out_ctx);
 
-void handoff_in_disconnect(struct handoff_in *in_ctx);
+int handoff_in_listen(int thread_id);
 void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send,
         struct http_client **client_to_handoff_again);
 void handoff_in_send(struct handoff_in *in_ctx);

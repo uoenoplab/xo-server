@@ -388,6 +388,7 @@ void reset_http_client(struct http_client *client)
 	client->proto_buf_len = 0;
 	if (client->proto_buf != NULL) {
 		free(client->proto_buf);
+		client->proto_buf = NULL;
 	}
 
 	client->num_fields = 0;

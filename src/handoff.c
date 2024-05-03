@@ -497,8 +497,9 @@ void handoff_out_connect(struct handoff_out *out_ctx) {
 
 	set_socket_non_blocking(out_ctx->fd);
 
-	if (connect(out_ctx->fd, (struct sockaddr*)&osd_addrs[out_ctx->osd_arr_index],
-		sizeof(osd_addrs[out_ctx->osd_arr_index])) == -1) {
+	struct sockaddr_in out_addr = osd_addrs[out_ctx->osd_arr_index];
+	out_addr.sin_port = htons(HANDOFF_CTRL_PORT + out_ctx->thread_id);
+	if (connect(out_ctx->fd, (struct sockaddr*)&out_addr, sizeof(out_addr)) == -1) {
 		if (errno != EINPROGRESS) {
 			perror("connect");
 			close(out_ctx->fd);
@@ -509,10 +510,32 @@ void handoff_out_connect(struct handoff_out *out_ctx) {
 	}
 
 	out_ctx->is_fd_connected = true;
+	out_ctx->reconnect_count = 0;
+
 	return;
 }
 
-void handoff_out_reconnect(struct handoff_out *out_ctx) {
+int handoff_out_reconnect(struct handoff_out *out_ctx) {
+	struct epoll_event event = {0};
+
+	if (out_ctx->is_fd_connected == false) {
+		int val = 0;
+		socklen_t len = sizeof(val);
+		int ret = getsockopt(out_ctx->fd, SOL_SOCKET, SO_ERROR, &val, &len);
+		if (ret != 0) {
+			fprintf(stderr, "error getting socket error code: %s\n", strerror(retval));
+			exit(EXIT_FAILURE);
+		}
+
+		if (val != 0) {
+			fprintf(stderr, "socket error: %s\n", strerror(error));
+		} else {
+			out_ctx->is_fd_connected = true;
+			out_ctx->reconnect_count = 0;
+			goto connected;
+		}
+	}
+
 	out_ctx->reconnect_count++;
 	out_ctx->is_fd_connected = false;
 	if (out_ctx->reconnect_count > MAX_HANDOFF_OUT_RECONNECT) {
@@ -532,7 +555,11 @@ void handoff_out_reconnect(struct handoff_out *out_ctx) {
 
 	if (out_ctx->fd != 0) close(out_ctx->fd);
 	handoff_out_connect(out_ctx);
-	struct epoll_event event = {0};
+
+	if (out_ctx->is_fd_connected) {
+		goto connected;
+	}
+
 	event.data.ptr = out_ctx;
 	event.events = EPOLLOUT;
 	if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_ADD, out_ctx->fd, &event) == -1) {
@@ -540,6 +567,41 @@ void handoff_out_reconnect(struct handoff_out *out_ctx) {
 		close(out_ctx->fd);
 		exit(EXIT_FAILURE);
 	}
+
+	return -1;
+
+connected:
+
+	bool send = false;
+
+	if (out_ctx->client == NULL) {
+	} else {
+		if (out_ctx->client->proto_buf != NULL) {
+			send = true;
+		}
+	}
+
+	if (send) {
+		event.data.ptr = out_ctx;
+		event.events = EPOLLOUT;
+		if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_ADD, out_ctx->fd, &event) == -1) {
+			perror("epoll_ctl");
+			close(out_ctx->fd);
+			exit(EXIT_FAILURE);
+		}
+		handoff_out_send(out_ctx);
+	} else {
+		event.data.ptr = out_ctx;
+		event.events = EPOLLOUT;
+		if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_ADD, out_ctx->fd, &event) == -1) {
+			perror("epoll_ctl");
+			close(out_ctx->fd);
+			exit(EXIT_FAILURE);
+		}
+		handoff_out_recv(out_ctx);
+	}
+
+	return 0;
 }
 
 // have to serialize before issue
@@ -549,9 +611,6 @@ static void do_handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct h
 #ifdef DEBUG
 	printf("%s enter\n", __func__);
 #endif
-
-	out_ctx->osd_arr_index = osd_arr_index;
-	out_ctx->thread_id = thread_id;
 
 	// enqueue this handoff request
 	if (!out_ctx->queue) {
@@ -655,8 +714,6 @@ void handoff_out_send(struct handoff_out *out_ctx)
 		return;
 	}
 
-	out_ctx->reconnect_count = 0;
-	out_ctx->is_fd_connected = true;
 	out_ctx->client->proto_buf_sent += ret;
 
 	// send done
@@ -666,11 +723,12 @@ void handoff_out_send(struct handoff_out *out_ctx)
 			out_ctx->thread_id, out_ctx->client->to_migrate, out_ctx->client->fd);
 #endif
 
-		if (out_ctx->recv_protobuf != NULL) {
-			free(out_ctx->recv_protobuf);
+		if (out_ctx->client->proto_buf != NULL) {
+			free(out_ctx->client->proto_buf);
+			out_ctx->client->proto_buf = NULL;
 		}
-		out_ctx->recv_protobuf_len = 0;
-		out_ctx->recv_protobuf_received = 0;
+		out_ctx->client->proto_buf_len = 0;
+		out_ctx->client->proto_buf_sent = 0;
 		struct epoll_event event = {0};
 		event.data.ptr = out_ctx;
 		event.events = EPOLLIN;
@@ -738,8 +796,6 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		return;
 	}
 
-	out_ctx->reconnect_count = 0;
-	out_ctx->is_fd_connected = true;
 	out_ctx->recv_protobuf_received += ret;
 	if (out_ctx->recv_protobuf_received < out_ctx->recv_protobuf_len)
 		return;
@@ -817,12 +873,12 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 #endif
 	// }
 
+	handoff_out_send_done(out_ctx);
+
 	tls_free_client(out_ctx->client);
 	free_http_client(out_ctx->client);
 	out_ctx->client = NULL;
 	socket_serialize__free_unpacked(migration_info, NULL);
-
-	handoff_out_send_done(out_ctx);
 
 	if (handoff_out_queue_is_empty(out_ctx->queue)) {
 		if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_DEL, out_ctx->fd, NULL) == -1) {
@@ -1010,21 +1066,42 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	in_ctx->client_for_originaldone = client;
 }
 
-void handoff_in_disconnect(struct handoff_in *in_ctx)
+int handoff_in_listen(int thread_id)
 {
-#ifdef DEBUG
-	printf("Thread %d HANDOFF_IN disconnect conn %d (epoll_fd %d, osd arr index %d, osd id %d)\n",
-		in_ctx->thread_id, in_ctx->fd, in_ctx->epoll_fd, in_ctx->osd_arr_index, osd_ids[in_ctx->osd_arr_index]);
-#endif
-	// main thread will handle actual close and new accept comein
-	if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_DEL, in_ctx->fd, NULL) == -1) {
-		// maybe already closed by main
-		if (errno != EBADF) {
-			perror("epoll_ctl");
-			exit(EXIT_FAILURE);
-		}
+	struct sockaddr_in saddr = {0};
+	saddr.sin_family = AF_INET;
+	saddr.sin_addr.s_addr = INADDR_ANY;
+	saddr.sin_port = htons(HANDOFF_CTRL_PORT + thread_id);
+
+	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (listen_fd == -1) {
+		perror("socket");
+		return -1;
 	}
-	in_ctx->fd = 0;
+
+	if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int))) {
+		perror("setsockopt");
+		return -1;
+	}
+
+	if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int))) {
+		perror("setsockopt");
+		return -1;
+	}
+
+	if (bind(listen_fd, (struct sockaddr *)&saddr, sizeof(saddr)) < 0) {
+		perror("bind");
+		return -1;
+	}
+
+	if (listen(listen_fd, SOMAXCONN) < 0) {
+		perror("listen");
+		return -1;
+	}
+
+	set_socket_non_blocking(listen_fd);
+
+	return listen_fd;
 }
 
 // no need to change epoll since we will need to wait for new migration request
@@ -1231,7 +1308,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 	in_ctx->send_protobuf_sent = 0;
 	struct epoll_event event = {0};
 	event.data.ptr = in_ctx;
-	event.events = EPOLLOUT;
+	event.events = EPOLLOUT | EPOLLRDHUP;
 	if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_MOD, in_ctx->fd, &event) == -1) {
 		perror("epoll_ctl");
 		exit(EXIT_FAILURE);
@@ -1274,7 +1351,7 @@ void handoff_in_send(struct handoff_in *in_ctx) {
 	in_ctx->wait_for_originaldone = true;
 	struct epoll_event event = {0};
 	event.data.ptr = in_ctx;
-	event.events = EPOLLIN;
+	event.events = EPOLLIN | EPOLLRDHUP;
 	if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_MOD, in_ctx->fd, &event) == -1) {
 		perror("epoll_ctl");
 		exit(EXIT_FAILURE);
