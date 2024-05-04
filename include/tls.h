@@ -8,6 +8,10 @@
 
 #include "http_client.h"
 
+#include "zlog.h"
+
+extern zlog_category_t *zlog_tls;
+
 int tls_init();
 void tls_uninit_ctx(SSL_CTX *ctx);
 SSL_CTX *tls_init_ctx(const char *certfile, const char *keyfile);

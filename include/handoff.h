@@ -24,6 +24,10 @@
 
 #define HANDOFF_CTRL_PORT 9000
 
+#include "zlog.h"
+
+extern zlog_category_t *zlog_handoff;
+
 enum {
         HANDOFF_REQUEST,
         HANDOFF_BACK_REQUEST,

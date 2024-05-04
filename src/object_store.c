@@ -9,6 +9,8 @@
 
 #define FIRST_READ_SIZE sizeof(char) * 1024 * 8192
 
+zlog_category_t *zlog_object_store;
+
 void delete_objects(struct http_client *client, const char *buf, size_t length)
 {
 	xmlParseChunk(client->xml_ctx, buf, length, 0);

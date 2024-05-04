@@ -159,6 +159,7 @@ target_include_directories(server.out PUBLIC
     include)
 
 target_link_libraries(server.out PUBLIC
+    zlog
     llhttp_static
     http_server
     ${INIH_LIBRARIES}

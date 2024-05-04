@@ -11,6 +11,8 @@
 #include "tls.h"
 #include "util.h"
 
+zlog_category_t *zlog_tls;
+
 //static void __attribute_maybe_unused__ hexdump(const char *title, void *buf, size_t len)
 //{
 //  printf("%s (%lu bytes) :\n", title, len);
@@ -117,21 +119,21 @@ static inline void print_ssl_state(SSL *ssl)
 
 static inline void print_ssl_error(const char *msg)
 {
-	fprintf(stderr, "%s\n", msg);
+	zlog_error(zlog_tls, "%s", msg);
 
 	BIO *bio = BIO_new(BIO_s_mem());
 	ERR_print_errors(bio);
 	char *buf;
 	size_t len = BIO_get_mem_data(bio, &buf);
 	if (len > 0)
-		printf("SSL-ERROR: %s", buf);
+		zlog_error(zlog_tls, "SSL-ERROR: %s", buf);
 	BIO_free(bio);
 }
 
 static inline int count_tls_records(const char *buffer, size_t buf_size) {
     // Check if the buffer starts with a TLS header
     if (buf_size < 5 || buffer[0] != 0x17 || buffer[1] != 0x03 || buffer[2] != 0x03) {
-        printf("Error: Buffer does not start with a TLS header.\n");
+        zlog_error(zlog_tls, "Error: Buffer does not start with a TLS header.");
         return -1;
     }
 
@@ -212,7 +214,7 @@ SSL_CTX *tls_init_ctx(const char *certfile, const char *keyfile)
 			print_ssl_error("SSL_CTX_use_certificate_file failed\n");
 			goto err;
 		}
-		printf("keyfile %s\n", keyfile);
+		//urintf("keyfile %s\n", keyfile);
 		if (SSL_CTX_use_PrivateKey_file(ctx, keyfile, SSL_FILETYPE_PEM) != 1) {
 			print_ssl_error("SSL_CTX_use_PrivateKey_file failed\n");
 			goto err;
@@ -224,7 +226,7 @@ SSL_CTX *tls_init_ctx(const char *certfile, const char *keyfile)
 			goto err;
 		}
 
-		printf("certificate and private key loaded and verified\n");
+		zlog_debug(zlog_tls, "certificate and private key loaded and verified");
 	}
 
 	// Enable all bug workarounds, only also TLS 1.3

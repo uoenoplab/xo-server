@@ -9,6 +9,10 @@
 #include "http_client.h"
 #include "md5.h"
 
+#include "zlog.h"
+
+extern zlog_category_t *zlog_object_store;
+
 void put_object(struct http_client *client, const char *buf, size_t length);
 void delete_objects(struct http_client *client, const char *buf, size_t length);
 

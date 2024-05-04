@@ -23,6 +23,7 @@
 #include "http_client.h"
 #include "tls.h"
 #include "osd_mapping.h"
+#include "object_store.h"
 
 #include "handoff.h"
 
@@ -63,6 +64,8 @@ int num_peers = 0;
 
 uint8_t my_mac[6];
 
+zlog_category_t *zlog_server;
+
 struct thread_param {
 	int thread_id;
 	// int server_fd;
@@ -81,7 +84,7 @@ uint64_t combine_ints_to_uint64(int high, int low) {
 
 void handleCtrlC(int signum)
 {
-	printf("Received Ctrl+C. Stopping the server thread [%d]...\n", gettid());
+	zlog_info(zlog_server, "Received Ctrl+C. Stopping the server thread [%d]...", gettid());
 	server_running = 0; // Set the flag to stop the server gracefully.
 }
 
@@ -119,7 +122,6 @@ static void add_mac_to_cache(struct in_addr ip_addr, uint8_t *mac) {
 
 static int get_mac_address(const char *ifname, struct sockaddr_in addr, uint8_t *mac) {
     if (get_mac_from_cache(addr.sin_addr, mac)) {
-	printf("Mac cache hit\n");
         return 0; // MAC found in cache, return immediately
     }
 
@@ -181,7 +183,7 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 
 	char *ip_addr_str = inet_ntoa(client_addr.sin_addr);
 
-	printf("Thread %d: Accepted connection (%d) from %s:%d\n", thread_id, new_socket, ip_addr_str, ntohs(client_addr.sin_port));
+	zlog_info(zlog_server, "Accepted connection (%d) from %s:%d", new_socket, ip_addr_str, ntohs(client_addr.sin_port));
 
 	// Add the new client socket to the epoll event list
 
@@ -194,8 +196,8 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	int ret = get_mac_address(ifname, client_addr, client->client_mac);
 	assert(ret == 0);
 
-	printf("MAC addr of remote ip %s is ", ip_addr_str);
-	print_mac_address(client->client_mac);
+	//printf("MAC addr of remote ip %s is ", ip_addr_str);
+	//print_mac_address(client->client_mac);
 
 	client->client_addr = client_addr.sin_addr.s_addr;
 	client->client_port = client_addr.sin_port;
@@ -218,15 +220,12 @@ void handle_client_disconnect(int epoll_fd, struct http_client *client,
 	int ret = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
 	assert(ret == 0);
 
-	printf("Thread %d client disconnected %d\n", thread_id, fd);
+	zlog_info(zlog_server, "Thread %d client disconnected %d", thread_id, fd);
 
 #ifdef USE_MIGRATION
 	// we don't free up client since we still need it for handoff_reset
 	if (client->from_migrate != -1) {
-#ifdef DEBUG
-		printf("Thread %d HANDOFF_OUT create handoff reset client to osd id %d on conn %d\n",
-			thread_id, client->from_migrate, client->fd);
-#endif
+		zlog_debug(zlog_handoff, "HANDOFF_OUT Create handoff reset client to osd %d on conn %d", client->from_migrate, client->fd);
 		handoff_out_serialize_reset(client);
 		int osd_arr_index = get_arr_index_from_osd_id(client->from_migrate);
 		handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client,
@@ -247,9 +246,9 @@ static void do_llhttp_execute(struct http_client *client, char *client_data_buff
 	// Echo the received data back to the client
 	ret = llhttp_execute(&(client->parser), client_data_buffer, bytes_received);
 	if (ret != HPE_OK) {
-		fprintf(stderr, "Parse error: %s %s\n", llhttp_errno_name(ret), client->parser.reason);
-		fprintf(stderr, "buf: %s\n", client_data_buffer);
-		fprintf(stderr, "Error pos: %ld %ld %p %p\n", bytes_received, llhttp_get_error_pos(&(client->parser)) - client_data_buffer, client_data_buffer, llhttp_get_error_pos(&(client->parser)));
+		zlog_error(zlog_server, "Parse error: %s %s", llhttp_errno_name(ret), client->parser.reason);
+		zlog_error(zlog_server, "buf: %s", client_data_buffer);
+		zlog_error(zlog_server, "Error pos: %ld %ld %p %p", bytes_received, llhttp_get_error_pos(&(client->parser)) - client_data_buffer, client_data_buffer, llhttp_get_error_pos(&(client->parser)));
 		//handle_client_disconnect(epoll_fd, client); // Handle client disconnection
 		exit(1);
 		//close(client->fd);
@@ -295,7 +294,7 @@ static ssize_t handle_client_data_ssl(struct http_client *client, SSL_CTX *ssl_c
 		return tls_handle_handshake(client, client_data_buffer, bytes_received);
 	}
 
-	fprintf(stderr, "%s: error state as handshake is done but ktls not set\n", __func__);
+	zlog_error(zlog_tls, "Error state as handshake is done but ktls not set");
 	return -1; // Shouldn't happen
 	// Handle handshake?
 }
@@ -311,16 +310,12 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 	if (bytes_received <= 0) {
 		// Client closed the connection or an error occurred
 		if (bytes_received == 0) {
-#ifdef DEBUG
-			fprintf(stderr, "Thread %d: conn %d recv returned 0\n", thread_id, client->fd);
-#endif
+			zlog_debug(zlog_server, "conn %d recv returned 0", client->fd);
 		} else if (errno == EAGAIN && client->tls.is_ssl && client->tls.is_ktls_set) {
-			printf("recv returned EAGAIN (client->tls.ssl %p)\n", client->tls.ssl);
+			zlog_debug(zlog_server, "recv returned EAGAIN (client->tls.ssl %p)", client->tls.ssl);
 			return 0;
 		} else {
-#ifdef DEBUG
-			fprintf(stderr, "Thread %d: conn %d recv returned -1 (%s)\n", thread_id, client->fd, strerror(errno));
-#endif
+			zlog_debug(zlog_server, "conn %d recv returned -1 (%s)", client->fd, strerror(errno));
 		}
 
 		// Remove the client socket from the epoll event list
@@ -330,7 +325,7 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 	if (client->tls.is_ssl){
 		bytes_received = handle_client_data_ssl(client, ssl_ctx, client_data_buffer, bytes_received);
 		if (bytes_received == -1) {
-			fprintf(stderr, "%s: handle_client_data_ssl returned %ld\n", __func__, bytes_received);
+			zlog_fatal(zlog_server, "handle_client_data_ssl returned %ld", bytes_received);
 			exit(EXIT_FAILURE);
 		}
 		if (bytes_received == 0) return 0;
@@ -377,14 +372,14 @@ static void *conn_wait(void *arg)
 
 	int err = rados_ioctx_create(cluster, BUCKET_POOL, &bucket_io_ctx);
 	if (err < 0) {
-		fprintf(stderr, "cannot open rados pool %s: %s\n", BUCKET_POOL, strerror(-err));
+		zlog_fatal(zlog_object_store, "cannot open rados pool %s", BUCKET_POOL);
 		rados_shutdown(cluster);
 		exit(1);
 	}
 
 	err = rados_ioctx_create(cluster, DATA_POOL, &data_io_ctx);
 	if (err < 0) {
-		fprintf(stderr, "cannot open rados pool %s: %s\n", DATA_POOL, strerror(-err));
+		zlog_fatal(zlog_object_store, "cannot open rados pool %s", DATA_POOL);
 		rados_shutdown(cluster);
 		exit(1);
 	}
@@ -409,9 +404,9 @@ static void *conn_wait(void *arg)
 		handoff_in_ctxs[num_osds - 1].fd = handoff_in_listenfd;
 		event.events = EPOLLIN;
 		event.data.ptr = &handoff_in_ctxs[num_osds - 1];
-		printf("Thread %d HANDOFF_IN regiester listenfd %d\n", param->thread_id, handoff_in_listenfd);
+		zlog_info(zlog_server, "Register listenfd %d", param->thread_id, handoff_in_listenfd);
 		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, handoff_in_listenfd, &event) == -1) {
-			perror("epoll_ctl: efd");
+			zlog_fatal(zlog_server, "Register listenfd %d failed: %s", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 		for (int i = 0; i < num_peers; i++)
@@ -465,10 +460,8 @@ static void *conn_wait(void *arg)
 	ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event);
 	assert(ret == 0);
 
-	printf("Thread %d HANDOFF_IN Ready to get accepted connections on fd %d port %d\n",
-		param->thread_id, handoff_in_listenfd, HANDOFF_CTRL_PORT + param->thread_id);
-	printf("Thread %d S3_HTTP Ready to accept connections on fd %d port %d\n",
-		param->thread_id, S3_HTTP_PORT, server_fd);
+	zlog_debug(zlog_handoff, "HANDOFF_IN Ready to get accepted connections on fd %d port %d", handoff_in_listenfd, HANDOFF_CTRL_PORT + param->thread_id);
+	zlog_debug(zlog_server, "S3_HTTP Ready to accept connections on fd %d port %d", S3_HTTP_PORT, server_fd);
 
 	while (server_running) {
 		// Wait for events using epoll
@@ -491,28 +484,22 @@ static void *conn_wait(void *arg)
 				// Handle events using callback functions
 				struct http_client *c = (struct http_client *)events[i].data.ptr;
 				if (c->fd == server_fd) {
-#ifdef DEBUG
-					printf("S3_HTTP_EVENT handle_new_connection\n");
-#endif
+					zlog_debug(zlog_server, "S3_HTTP_EVENT handle_new_connection");
 					handle_new_connection(epoll_fd, param->ifname, server_fd, thread_id);
 				} else if ((events[i].events & EPOLLERR) ||
 						   (events[i].events & EPOLLHUP) ||
 						   (events[i].events & EPOLLRDHUP)) {
-					fprintf(stderr, "Thread %d S3_HTTP error event (fd %d events %d)\n",
+					zlog_error(zlog_server, "Thread %d S3_HTTP error event (fd %d events %d)",
 						param->thread_id, c->fd, events[i].events);
 					handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
 				} else if (events[i].events & EPOLLOUT) {
-#ifdef DEBUG
-					printf("S3_HTTP_EVENT send_client_data c->fd %d\n", c->fd);
-#endif
+					zlog_debug(zlog_server, "S3_HTTP_EVENT send_client_data c->fd %d", c->fd);
 					ret = send_client_data(c);
 					if (ret == -1) {
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
 					}
 				} else if (events[i].events & EPOLLIN) {
-#ifdef DEBUG
-					printf("S3_HTTP_EVENT handle_client_data\n");
-#endif
+					zlog_debug(zlog_server, "S3_HTTP_EVENT handle_client_data");
 					ret = handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
 					if (ret == -1) {
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
@@ -520,14 +507,9 @@ static void *conn_wait(void *arg)
 #ifdef USE_MIGRATION
 					// check if ret okay, connection could be closed
 					if (ret != -1 && enable_migration && c->to_migrate != -1) {
-#ifdef DEBUG
-						printf("Thread %d S3_HTTP_EVENT need migrate conn %d to osd id %d\n",
-							param->thread_id, c->fd, c->to_migrate);
-#endif
+						zlog_debug(zlog_handoff, "S3_HTTP_EVENT Need to migrate conn %d to OSD %d", c->fd, c->to_migrate);
 						handoff_out_serialize(c);
-#ifdef DEBUG
-						printf("Thread %d HANDOFF_OUT serialized client on conn %d\n", param->thread_id, c->fd);
-#endif
+						zlog_debug(zlog_handoff, "HANDOFF_OUT serialized client on conn %d", c->fd);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
 						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
@@ -535,7 +517,7 @@ static void *conn_wait(void *arg)
 #endif
 				}
 				else {
-					fprintf(stderr, "Thread %d S3_HTTP unhandled event (fd %d events %d)\n",
+					zlog_error(zlog_server, "Thread %d S3_HTTP unhandled event (fd %d events %d)",
 						param->thread_id, c->fd, events[i].events);
 				}
 			}
@@ -545,25 +527,23 @@ static void *conn_wait(void *arg)
 				in_ctx->data_io_ctx = data_io_ctx;
 				in_ctx->bucket_io_ctx = bucket_io_ctx;
 				if (in_ctx->fd == handoff_in_listenfd) {
-#ifdef DEBUG
-					printf("HANDOFF_IN_EVENT handoff_in_listenfd\n");
-#endif
+					zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT handoff_in_listenfd");
 					if (events[i].events & EPOLLIN) {
 						struct sockaddr_in in_addr;
 						socklen_t in_len = sizeof(in_addr);
 						int in_fd = accept(handoff_in_listenfd, (struct sockaddr *)&in_addr, &in_len);
 						if (in_fd == -1) {
-							perror("accept");
+							zlog_error(zlog_handoff, "Fail to accept handoff_in_listenfd %d: %s", handoff_in_listenfd, strerror(errno));
 							break;
 						}
 
 						if (setsockopt(in_fd, IPPROTO_TCP, TCP_QUICKACK, &(int){1}, sizeof(int)) == -1) {
-							perror("setsockopt TCP_QUICKACK");
+							zlog_fatal(zlog_handoff, "Fail to set TCP_QUICKACK on in_fd %d: %s", in_fd, strerror(errno));
 							exit(EXIT_FAILURE);
 						}
 
 						if (setsockopt(in_fd, IPPROTO_TCP, TCP_NODELAY, &(int){1}, sizeof(int)) == -1) {
-							perror("setsockopt TCP_NODELAY");
+							zlog_fatal(zlog_handoff, "Fail to set TCP_NODELAY on in_fd %d: %s", in_fd, strerror(errno));
 							exit(EXIT_FAILURE);
 						}
 
@@ -575,27 +555,21 @@ static void *conn_wait(void *arg)
 						}
 
 						if (osd_arr_index < num_peers) {
-#ifdef DEBUG
-							printf("Thread %d Accepted handoff_in fd %d (host %s, port %d, osd_id %d)\n",
-								param->thread_id, in_fd, osd_addr_strs[i], ntohs(in_addr.sin_port), osd_ids[i]);
-#endif
+							zlog_info(zlog_handoff, "Accepted handoff_in fd %d (host %s, port %d, osd_id %d)", in_fd, osd_addr_strs[i], ntohs(in_addr.sin_port), osd_ids[i]);
 						} else {
-							fprintf(stderr, "Thread %d Unkown handoff_in client %s, not in osd list, drop\n",
-								param->thread_id, inet_ntoa(in_addr.sin_addr));
+							zlog_fatal(zlog_handoff, "Unkown handoff_in client %s, not in osd list, drop", inet_ntoa(in_addr.sin_addr));
 							close(in_fd);
 							exit(EXIT_FAILURE);
 						}
 
 						set_socket_non_blocking(in_fd);
 
-#ifdef DEBUG
 						if (handoff_in_ctxs[osd_arr_index].fd != 0) {
 							// main thread will close old fd and cause global epoll list delete
-							printf("Thread %d HANDOFF_IN receives a new conn %d and overwrites old conn %d (osd id %d)\n",
-								param->thread_id, in_fd, handoff_in_ctxs[osd_arr_index].fd, osd_ids[osd_arr_index]);
+							zlog_debug(zlog_handoff, "HANDOFF_IN receives a new conn %d and overwrites old conn %d (osd id %d)",
+								in_fd, handoff_in_ctxs[osd_arr_index].fd, osd_ids[osd_arr_index]);
 							close(handoff_in_ctxs[osd_arr_index].fd);
 						}
-#endif
 
 						handoff_in_ctxs[osd_arr_index].fd = in_fd;
 						handoff_in_ctxs[osd_arr_index].epoll_fd = epoll_fd;
@@ -611,83 +585,65 @@ static void *conn_wait(void *arg)
 						ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event);
 						assert(ret == 0);
 					} else {
-						fprintf(stderr, "Thread %d HANDOFF_IN unhanlded event on handoff_in_listenfd %d (events %d)\n",
+						zlog_debug(zlog_handoff, "Thread %d HANDOFF_IN unhanlded event on handoff_in_listenfd %d (events %d)",
 							param->thread_id, handoff_in_listenfd, events[i].events);
 					}
 				} else if ((events[i].events & EPOLLERR) ||
 						   (events[i].events & EPOLLHUP) ||
 						   (events[i].events & EPOLLRDHUP)){
-					fprintf(stderr, "Thread %d HANDOFF_IN received err/hup event"
-						"on conn %d close now (events %d osd id %d)\n",
-						param->thread_id, in_ctx->fd, events[i].events, osd_ids[in_ctx->osd_arr_index]);
+					zlog_debug(zlog_handoff, "HANDOFF_IN received err/hup event"
+							"on conn %d close now (events %d osd id %d)",
+							in_ctx->fd, events[i].events, osd_ids[in_ctx->osd_arr_index]);
 					handoff_in_disconnect(in_ctx);
 				} else if (events[i].events & EPOLLIN) {
-#ifdef DEBUG
-					printf("HANDOFF_IN_EVENT handoff_in_recv\n");
-#endif
+					zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT handoff_in_recv");
 					bool ready_to_send = false;
 					struct http_client *client_to_handoff_again = NULL;
 					handoff_in_recv(in_ctx, &ready_to_send, &client_to_handoff_again);
 					if (ready_to_send) {
-#ifdef DEBUG
-						printf("HANDOFF_IN_EVENT handoff_in_send\n");
-#endif
+						zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT handoff_in_send ready to send");
 						handoff_in_send(in_ctx);
 					}
 					if (client_to_handoff_again) {
-#ifdef DEBUG
-						printf("Thread %d HANDOFF_IN we need to re-handoff to osd id %d\n",
-							param->thread_id, client_to_handoff_again->to_migrate);
-#endif
+						zlog_debug(zlog_handoff, "HANDOFF_IN we need to re-handoff to osd id %d", client_to_handoff_again->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(client_to_handoff_again->to_migrate);
 						handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
 					}
 				} else if (events[i].events & EPOLLOUT) {
-#ifdef DEBUG
-					printf("HANDOFF_IN_EVENT handoff_in_send\n");
-#endif
+					zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT handoff_in_send");
 					handoff_in_send(in_ctx);
 				}
 				else {
-					fprintf(stderr, "Thread %d HANDOFF_IN unhandled event (fd %d events %d)\n",
-						param->thread_id, in_ctx->fd, events[i].events);
+					zlog_debug(zlog_handoff, "HANDOFF_IN unhandled event (fd %d events %d)", in_ctx->fd, events[i].events);
 				}
 			} else if (enable_migration && epoll_data_u32 == HANDOFF_OUT_EVENT) {
 				struct handoff_out *out_ctx = (struct handoff_out *)events[i].data.ptr;
 				if ((events[i].events & EPOLLERR) ||
 					(events[i].events & EPOLLHUP) ||
 					(events[i].events & EPOLLRDHUP)) {
-#ifdef DEBUG
-					printf("HANDOFF_OUT_EVENT handoff_out_reconnect\n");
-#endif
+					zlog_debug(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_reconnect");
 					// means current connection is broken
 					handoff_out_reconnect(out_ctx);
 				} else if (events[i].events & EPOLLOUT) {
-#ifdef DEBUG
-					printf("HANDOFF_OUT_EVENT handoff_out_send\n");
-#endif
+					zlog_debug(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_send");
 					if (out_ctx->is_fd_connected) {
 						handoff_out_send(out_ctx);
 					} else {
 						handoff_out_reconnect(out_ctx);
 					}
 				} else if (events[i].events & EPOLLIN) {
-#ifdef DEBUG
-					printf("HANDOFF_OUT_EVENT handoff_out_recv\n");
-#endif
+					zlog_debug(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_recv");
 					// handle handoff response, if all received, then swtich back to epollout
 					handoff_out_recv(out_ctx);
 				}
 				else {
-					fprintf(stderr, "Thread %d HANDOFF_OUT unhandled event (fd %d events %d)\n",
-						param->thread_id, events[i].data.fd, events[i].events);
+					zlog_debug(zlog_handoff, "HANDOFF_OUT unhandled event (fd %d events %d)", events[i].data.fd, events[i].events);
 				}
 			}
 #endif
 			else {
-				fprintf(stderr, "Thread %d unhandled event (events %d data.u32 %d)\n",
-					param->thread_id, events[i].events, epoll_data_u32);
+				zlog_error(zlog_server, "Unhandled event (events %d data.u32 %d)", events[i].events, epoll_data_u32);
 			}
 		}
 	}
@@ -724,7 +680,7 @@ static int rearrange_osd_addrs(const char *ifname)
 	strncpy(ifr.ifr_name, ifname , IFNAMSIZ);
 
 	if (ioctl(fd, SIOCGIFADDR, &ifr) == -1 ) {
-		perror("IOCTL SIOCGIFADDR failed");
+		zlog_fatal(zlog_server, "IOCTL SIOCGIFADDR failed");
 		close(fd);
 		exit(EXIT_FAILURE);
 	}
@@ -733,7 +689,7 @@ static int rearrange_osd_addrs(const char *ifname)
 
 	// Perform the IOCTL operation to fetch the hardware address
 	if (ioctl(fd, SIOCGIFHWADDR, &ifr) == -1) {
-		perror("IOCTL SIOCGIFHWADDR failed");
+		zlog_fatal(zlog_server, "IOCTL SIOCGIFHWADDR failed");
 		close(fd);
 		exit(EXIT_FAILURE);
 	}
@@ -763,10 +719,10 @@ static int rearrange_osd_addrs(const char *ifname)
 		osd_addr_strs[num_osds] = strdup(my_ip_address);
 		osd_ids[num_osds] = -1;
 		num_osds++;
-		printf("xo-server is not running on an OSD (interface %s, ip %s, mac %s)\n",
+		zlog_info(zlog_server, "xo-server is not running on an OSD (interface %s, ip %s, mac %s)",
 			ifname, osd_addr_strs[num_osds - 1], mac_str);
 	} else {
-		printf("xo-server is running on an OSD (interface %s, ip %s, mac %s, osd_id %d)\n",
+		zlog_info(zlog_server, "xo-server is running on an OSD (interface %s, ip %s, mac %s, osd_id %d)",
 			ifname, osd_addr_strs[num_osds - 1], mac_str, osd_ids[num_osds - 1]);
 	}
 
@@ -776,7 +732,7 @@ static int rearrange_osd_addrs(const char *ifname)
 		osd_addrs[i].sin_family = AF_INET;
 		osd_addrs[i].sin_port = htons(HANDOFF_CTRL_PORT);
 		if (inet_pton(AF_INET, osd_addr_strs[i], &osd_addrs[i].sin_addr) <= 0) {
-			printf("Invalid address \"%s\" for osd id %d\n", osd_addr_strs[i], osd_ids[i]);
+			zlog_fatal(zlog_server, "Invalid address \"%s\" for osd id %d", osd_addr_strs[i], osd_ids[i]);
 			exit(EXIT_FAILURE);
 		}
 	}
@@ -798,7 +754,7 @@ static int ceph_config_parser(void* user, const char* section, const char* name,
 				num_osds++;
 			}
 			if (num_osds == MAX_OSDS) {
-				fprintf(stderr, "num_osds %d exceeding MAX_OSDS %d\n", num_osds, MAX_OSDS);
+				zlog_fatal(zlog_server, "num_osds %d exceeding MAX_OSDS %d", num_osds, MAX_OSDS);
 				exit(EXIT_FAILURE);
 			}
 		}
@@ -812,6 +768,40 @@ int main(int argc, char *argv[])
 	rados_t cluster;
 	struct sigaction sa;
 	int err;
+
+	err = zlog_init("/etc/zlog.conf");
+	if (err) {
+		printf("init failed\n");
+		return -1;
+	}
+
+	zlog_handoff = zlog_get_category("handoff");
+	if (!zlog_handoff) {
+		printf("get handoff zlog fail\n");
+		zlog_fini();
+		return -2;
+	}
+
+	zlog_server = zlog_get_category("server");
+	if (!zlog_server) {
+		printf("get server zlog fail\n");
+		zlog_fini();
+		return -2;
+	}
+
+	zlog_tls = zlog_get_category("tls");
+	if (!zlog_tls) {
+		printf("get tls zlog fail\n");
+		zlog_fini();
+		return -2;
+	}
+
+	zlog_object_store = zlog_get_category("object_store");
+	if (!zlog_object_store) {
+		printf("get tls zlog fail\n");
+		zlog_fini();
+		return -2;
+	}
 
 	signal(SIGPIPE, SIG_IGN);
 
@@ -830,7 +820,7 @@ int main(int argc, char *argv[])
 		enable_migration = true;
 	else
 		enable_migration = false;
-	printf("Connection migration: %s\n", enable_migration ? "enabled" : "disabled");
+	zlog_info(zlog_server, "Connection migration: %s", enable_migration ? "enabled" : "disabled");
 
 	// initialize libforward-tc
 	err = init_forward(argv[1], "ingress", "1:");
@@ -839,7 +829,7 @@ int main(int argc, char *argv[])
 #endif
 	err = tls_init();
 	if (err < 0) {
-		fprintf(stderr, "%s: cannot init openssl\n", __func__);
+		zlog_fatal(zlog_tls, "cannot init openssl");
 		exit(1);
 	}
 
@@ -852,11 +842,11 @@ int main(int argc, char *argv[])
 	char *ifname = argv[1];
 	err = ini_parse("/etc/ceph/ceph.conf", ceph_config_parser, NULL);
 	if (err < 0) {
-		printf("Can't read '%s'!\n", "/etc/ceph/ceph.conf");
+		zlog_fatal(zlog_object_store, "Can't read '%s'!", "/etc/ceph/ceph.conf");
 		exit(1);
 	}
 	else if (err) {
-		printf("Bad config file (first error on line %d)!\n", err);
+		zlog_fatal(zlog_object_store, "Bad config file (first error on line %d)!", err);
 		exit(1);
 	}
 
@@ -865,19 +855,19 @@ int main(int argc, char *argv[])
 
 	err = rados_create2(&cluster, "ceph", "client.admin", 0);
 	if (err < 0) {
-		fprintf(stderr, "%s: cannot create a cluster handle: %s\n", argv[0], strerror(-err));
+		zlog_fatal(zlog_object_store, "%s: cannot create a cluster handle: %s", argv[0], strerror(-err));
 		exit(1);
 	}
 
 	err = rados_conf_read_file(cluster, "/etc/ceph/ceph.conf");
 	if (err < 0) {
-		fprintf(stderr, "%s: cannot read config file: %s\n", argv[0], strerror(-err));
+		zlog_fatal(zlog_object_store, "cannot read config file");
 		exit(1);
 	}
 
 	err = rados_connect(cluster);
 	if (err < 0) {
-		fprintf(stderr, "%s: cannot connect to cluster: %s\n", argv[0], strerror(-err));
+		zlog_fatal(zlog_object_store, "cannot connect to cluster");
 		exit(EXIT_FAILURE);
 	}
 
@@ -897,7 +887,7 @@ int main(int argc, char *argv[])
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGUSR1, &sa, NULL);
 
-	printf("Launching %ld threads\n", nproc);
+	zlog_info(zlog_server, "Launching %ld threads", nproc);
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
 		param[i].cluster = cluster;
@@ -910,41 +900,36 @@ int main(int argc, char *argv[])
 		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
 
 		if (pthread_create(&threads[i], &attr, &conn_wait, &param[i]) != 0) {
-			fprintf(stderr, "fail to create thread %d\n", i);
+			zlog_fatal(zlog_server, "fail to create thread %d", i);
 			exit(1);
 		}
 	}
 
 	pause();
-	printf("terminating\n");
+	zlog_info(zlog_server, "terminating");
 
 	for (int i = 0; i < nproc; i++) {
 		if (pthread_kill(threads[i], SIGUSR1) != 0) {
-			fprintf(stderr, "fail to signal thread %d\n", i);
+			zlog_fatal(zlog_server, "fail to signal thread %d", i);
 			exit(1);
 		}
 
 		if (pthread_join(threads[i], NULL) != 0) {
-			fprintf(stderr, "fail to join thread %d\n", i);
+			zlog_fatal(zlog_server, "fail to join thread %d", i);
 			exit(1);
 		}
 	}
-	printf("all thread killed\n");
 
 	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);
-	printf("rados shutdown\n");
 
 	for (int i = 0; i < num_osds; i++) {
 		if (osd_addr_strs[i] != NULL) free(osd_addr_strs[i]);
 	}
-	printf("osd addr freed\n");
 
 	fini_forward();
-	printf("libforward freed\n");
 	fini_forward_ebpf();
-	printf("libforward ebpf freed\n");
-	printf("Server terminated!\n");
+	zlog_fini();
 
 	return 0;
 }
