@@ -509,7 +509,7 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 		do {
 			ret = SSL_read(client->tls.ssl, client_data_buffer + bytes_decrypted,
 				bytes_received - bytes_decrypted);
-			printf("bytes_decrypted %d ret %d\n", bytes_decrypted, ret);
+			zlog_debug(zlog_tls, "bytes_decrypted %d ret %d\n", bytes_decrypted, ret);
 			if (ret < 0) {
 				ret = SSL_get_error(client->tls.ssl, ret);
 				if (ret != SSL_ERROR_WANT_READ) {
