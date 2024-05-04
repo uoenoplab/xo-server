@@ -110,7 +110,7 @@ static void handoff_out_enqueue_front(struct handoff_out_queue* queue, void *cli
 {
 	struct handoff_out_req* new_req = handoff_out_req_create(client);
 	if (!new_req) {
-		printf("Heap Overflow\n");
+		zlog_error(zlog_handoff, "Heap Overflow");
     		return;
 	}
 
@@ -132,7 +132,7 @@ static void handoff_out_enqueue(struct handoff_out_queue* queue, void *client)
 {
 	struct handoff_out_req* new_req = handoff_out_req_create(client);
 	if (!new_req) {
-		printf("Heap Overflow\n");
+		zlog_error(zlog_handoff, "Heap Overflow");
 		return;
 	}
 
@@ -370,13 +370,13 @@ void handoff_out_serialize(struct http_client *client)
 
 		socklen_t optlen = sizeof(struct tls12_crypto_info_aes_gcm_256);
 		if (getsockopt(fd, SOL_TLS, TLS_TX, crypto_info_send, &optlen)) {
-			fprintf(stderr, "Couldn't get TLS_TX option (%s)\n", strerror(errno));
+			zlog_fatal(zlog_tls, "Couldn't get TLS_TX option (%s)", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 
 		optlen = sizeof(struct tls12_crypto_info_aes_gcm_256);
 		if (getsockopt(fd, SOL_TLS, TLS_RX, crypto_info_recv, &optlen)) {
-			fprintf(stderr, "Couldn't get TLS_RX option (%s)\n", strerror(errno));
+			zlog_fatal(zlog_tls, "Couldn't get TLS_RX option (%s)", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 	}
@@ -521,12 +521,12 @@ int handoff_out_reconnect(struct handoff_out *out_ctx) {
 		socklen_t len = sizeof(val);
 		int ret = getsockopt(out_ctx->fd, SOL_SOCKET, SO_ERROR, &val, &len);
 		if (ret != 0) {
-			fprintf(stderr, "error getting socket error code: %s\n", strerror(errno));
+			zlog_fatal(zlog_handoff, "error getting socket error code: %s", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 
 		if (val != 0) {
-			fprintf(stderr, "socket error: %s\n", strerror(val));
+			zlog_error(zlog_handoff, "socket error: %s", strerror(val));
 		} else {
 			out_ctx->is_fd_connected = true;
 			out_ctx->reconnect_count = 0;
@@ -537,19 +537,19 @@ int handoff_out_reconnect(struct handoff_out *out_ctx) {
 	out_ctx->reconnect_count++;
 	out_ctx->is_fd_connected = false;
 	if (out_ctx->reconnect_count > MAX_HANDOFF_OUT_RECONNECT) {
-		fprintf(stderr, "Thread %d HANDOFF_OUT try RE-connect too many times (osd id %d, ip %s, port %d, reconnect count %d)\n",
-			out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
-			osd_addr_strs[out_ctx->osd_arr_index],
-			HANDOFF_CTRL_PORT + out_ctx->thread_id,
+		zlog_fatal(zlog_handoff, "HANDOFF_OUT try RE-connect too many times (osd id %d, ip %s, port %d, reconnect count %d)",
+				osd_ids[out_ctx->osd_arr_index],
+				osd_addr_strs[out_ctx->osd_arr_index],
+				HANDOFF_CTRL_PORT + out_ctx->thread_id,
 			out_ctx->reconnect_count);
 		exit(EXIT_FAILURE);
 	}
 
-	printf("Thread %d HANDOFF_OUT try RE-connect (osd id %d, ip %s, port %d, reconnect count %d)\n",
-		out_ctx->thread_id, osd_ids[out_ctx->osd_arr_index],
-		osd_addr_strs[out_ctx->osd_arr_index],
-		HANDOFF_CTRL_PORT + out_ctx->thread_id,
-		out_ctx->reconnect_count);
+	zlog_error(zlog_handoff, "HANDOFF_OUT try RE-connect (osd id %d, ip %s, port %d, reconnect count %d)",
+			osd_ids[out_ctx->osd_arr_index],
+			osd_addr_strs[out_ctx->osd_arr_index],
+			HANDOFF_CTRL_PORT + out_ctx->thread_id,
+			out_ctx->reconnect_count);
 
 	if (out_ctx->fd != 0) close(out_ctx->fd);
 	handoff_out_connect(out_ctx);
@@ -725,7 +725,7 @@ static void handoff_out_send_done(struct handoff_out *out_ctx)
 	int ret = send(out_ctx->fd, &magic_number,
 		sizeof(magic_number), NULL);
 	if (ret != sizeof(magic_number)) {
-		printf("%s: send failed ret %d\n", __func__);
+		zlog_fatal(zlog_handoff, "send failed ret %d");
 		exit(EXIT_FAILURE);
 	}
 }
@@ -743,12 +743,12 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 			return;
 		}
 		if (ret != sizeof(out_ctx->recv_protobuf_len)) {
-			fprintf(stderr, "%s: unable to handle the case TCP recv not equal to 4 bytes on header\n", __func__);
+			zlog_fatal(zlog_handoff, "unable to handle the case TCP recv not equal to 4 bytes on header");
 			exit(EXIT_FAILURE);
 		}
 		out_ctx->recv_protobuf_len = ntohl(out_ctx->recv_protobuf_len);
 		if (out_ctx->recv_protobuf_len == 0) {
-			fprintf(stderr, "%s: out_ctx->recv_protobuf_len is zero\n", __func__);
+			zlog_fatal(zlog_handoff, "out_ctx->recv_protobuf_len is zero");
 			exit(EXIT_FAILURE);
 		}
 		out_ctx->recv_protobuf = malloc(out_ctx->recv_protobuf_len);
@@ -956,7 +956,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 
 	if (migration_info->ktlsbuf.len != 0) {
 		if (migration_info->ktlsbuf.len != 2 * sizeof(struct tls12_crypto_info_aes_gcm_256)) {
-			fprintf(stderr, "incorrect ktlsbuf length (%ld)", migration_info->ktlsbuf.len);
+			zlog_fatal(zlog_tls, "incorrect ktlsbuf length (%ld)", migration_info->ktlsbuf.len);
 			exit(EXIT_FAILURE);
 		}
 		struct tls12_crypto_info_aes_gcm_256 *crypto_info_send =
@@ -964,17 +964,17 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 		struct tls12_crypto_info_aes_gcm_256 *crypto_info_recv =
 			migration_info->ktlsbuf.data + sizeof(struct tls12_crypto_info_aes_gcm_256);
 		if (setsockopt(rfd, SOL_TCP, TCP_ULP, "tls", sizeof("tls")) < 0) {
-			fprintf(stderr, "set ULP tls fail (%s)\n", strerror(errno));
+			zlog_fatal(zlog_tls, "set ULP tls fail (%s)", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 		if (setsockopt(rfd, SOL_TLS, TLS_TX, crypto_info_send,
 						sizeof(*crypto_info_send)) < 0) {
-			fprintf(stderr, "Couldn't set TLS_TX option (%s)\n", strerror(errno));
+			zlog_fatal(zlog_tls, "Couldn't set TLS_TX option (%s)", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 		if (setsockopt(rfd, SOL_TLS, TLS_RX, crypto_info_recv,
 						sizeof(*crypto_info_recv)) < 0) {
-			fprintf(stderr, "Couldn't set TLS_RX option (%s)\n", strerror(errno));
+			zlog_fatal(zlog_tls, "Couldn't set TLS_RX option (%s)", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 	}
@@ -993,7 +993,6 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	}
 	memcpy(client->client_mac, &(migration_info->peer_mac), sizeof(uint8_t) * 6);
 
-	printf("client fd %d KTLS buf len %d\n", client->fd, migration_info->ktlsbuf.len);
 	if (migration_info->ktlsbuf.len) {
 		client->tls.is_ssl = true;
 		client->tls.is_handshake_done = true;
@@ -1093,7 +1092,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 	if (in_ctx->recv_protobuf == NULL) {
 		int ret = recv(in_ctx->fd, &in_ctx->recv_protobuf_len, sizeof(in_ctx->recv_protobuf_len), 0);
 		if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
-			fprintf(stderr, "handoff_in_recv recv1: %s", strerror(errno));
+			zlog_error(zlog_handoff, "handoff_in_recv recv1: %s", strerror(errno));
 			handoff_in_disconnect(in_ctx);
 			return;
 		}
@@ -1101,7 +1100,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 			return;
 		}
 		if (ret != sizeof(in_ctx->recv_protobuf_len)) {
-			fprintf(stderr, "%s: unable to handle the case TCP recv not equal to 4 bytes on header\n", __func__);
+			zlog_fatal(zlog_handoff, "unable to handle the case TCP recv not equal to 4 bytes on header");
 			exit(EXIT_FAILURE);
 		}
 
@@ -1123,15 +1122,15 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 		if (in_ctx->wait_for_originaldone) {
 			// we are waiting for original done
 			// but we didn't receive it, but a new migration
-			printf("Thread %d HANDOFF_IN new migration comes before original "
-				"server done from osd id %d\n",
-				in_ctx->thread_id, osd_ids[in_ctx->osd_arr_index]);
+			zlog_fatal(zlog_handoff, "HANDOFF_IN new migration comes before original "
+				"server done from osd id %d",
+				osd_ids[in_ctx->osd_arr_index]);
 			exit(EXIT_FAILURE);
 		}
 
 		in_ctx->recv_protobuf_len = ntohl(in_ctx->recv_protobuf_len);
 		if (in_ctx->recv_protobuf_len == 0) {
-			fprintf(stderr, "%s: in_ctx->recv_protobuf_len is zero\n", __func__);
+			zlog_fatal(zlog_handoff, "in_ctx->recv_protobuf_len is zero");
 			exit(EXIT_FAILURE);
 		}
 		in_ctx->recv_protobuf = malloc(in_ctx->recv_protobuf_len);
@@ -1140,7 +1139,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 	int ret = recv(in_ctx->fd, in_ctx->recv_protobuf + in_ctx->recv_protobuf_received,
 		in_ctx->recv_protobuf_len - in_ctx->recv_protobuf_received, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
-		fprintf(stderr, "handoff_in_recv recv2: %s", strerror(errno));
+		zlog_error(zlog_handoff, "handoff_in_recv recv2: %s", strerror(errno));
 		handoff_in_disconnect(in_ctx);
 		return;
 	}
@@ -1213,7 +1212,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 #endif
 		assert(ret == 0);
 	} else {
-		fprintf(stderr, "%s: can only handle HANDOFF_REQUEST or HANDOFF_BACK_REQUEST msg\n", __func__);
+		zlog_fatal(zlog_handoff, "can only handle HANDOFF_REQUEST or HANDOFF_BACK_REQUEST msg");
 		exit(EXIT_FAILURE);
 	}
 
@@ -1270,8 +1269,8 @@ void handoff_in_send(struct handoff_in *in_ctx) {
 	in_ctx->send_protobuf_sent += ret;
 
 	if (in_ctx->send_protobuf_sent < in_ctx->send_protobuf_len) {
-		printf("Thread %d HANDOFF_IN response to osd id %d sent partial %d/%d\n",
-			in_ctx->thread_id, osd_ids[in_ctx->osd_arr_index], in_ctx->send_protobuf_sent, in_ctx->send_protobuf_len);
+		zlog_debug(zlog_handoff, "HANDOFF_IN response to osd id %d sent partial %d/%d",
+			osd_ids[in_ctx->osd_arr_index], in_ctx->send_protobuf_sent, in_ctx->send_protobuf_len);
 		return;
 	}
 	zlog_debug(zlog_handoff, "HANDOFF_IN response to osd id %d all sent",
