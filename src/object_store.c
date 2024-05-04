@@ -25,7 +25,7 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 		client->object_offset += length;
 	}
 	else {
-		printf("Chunked upload not supported\n");
+		zlog_error(zlog_object_store, "Chunked upload not supported for /%s/%s", client->bucket_name, client->object_name);
 	}
 }
 
@@ -36,7 +36,7 @@ void aio_head_read_callback(rados_completion_t comp, void *arg) {
 	get_datetime_str(datetime_str, 128);
 
 	if (client->prval != 0) {
-		printf("object %s not found\n", client->object_name);
+		zlog_error(zlog_object_store, "Object %s not found", client->object_name);
 		client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
 		assert(client->response_size <= MAX_RESPONSE_SIZE);
 		snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
@@ -147,7 +147,7 @@ void complete_head_request(struct http_client *client, const char *datetime_str)
 		char buf;
 		ret = rados_read(client->bucket_io_ctx, client->bucket_name, &buf, 0, 0);
 		if (ret != 0) {
-			fprintf(stderr, "Bucket %s does not exist\n", client->bucket_name);
+			zlog_error(zlog_object_store, "Bucket %s does not exist", client->bucket_name);
 			client->response_size = snprintf(NULL, 0, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str) + 1;
 			assert(client->response_size <= MAX_RESPONSE_SIZE);
 			snprintf(client->response, client->response_size, "%s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, datetime_str);
@@ -284,7 +284,7 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 
 		if (object_name == NULL) {
 			ret = rados_remove(client->bucket_io_ctx, client->bucket_name);
-			if (ret) { perror("rados_remove"); }
+			if (ret) { zlog_error(zlog_object_store, "Remove bucket %s failed", client->bucket_name); }
 
 			client->response_size = snprintf(NULL, 0, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
 			assert(client->response_size <= MAX_RESPONSE_SIZE);
@@ -345,7 +345,7 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 		ret = rados_write_op_operate2(write_op, client->data_io_ctx, client->object_name, NULL, 0);
 		assert(ret == 0);
 		rados_release_write_op(write_op);
-		printf("removed %s\n", client->object_name);
+		zlog_debug(zlog_object_store, "Removed /%s/%s", client->bucket_name, client->object_name);
 
 		const char *keys_name = client->object_name;
 		const size_t keys_len = strlen(client->object_name);
@@ -354,7 +354,7 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 		ret = rados_write_op_operate2(write_op, client->bucket_io_ctx, client->bucket_name, NULL, 0);
 		assert(ret == 0);
 		rados_release_write_op(write_op);
-		printf("removed %s from %s\n", client->object_name, client->bucket_name);
+		zlog_info(zlog_object_store, "Removed object /%s/%s", client->bucket_name, client->object_name);
 
 		client->response_size = snprintf(NULL, 0, "HTTP/1.1 204 No Content\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", AMZ_REQUEST_ID, datetime_str) + 1;
 		assert(client->response_size <= MAX_RESPONSE_SIZE);
@@ -473,7 +473,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 
 		if (ret != 0 || prval != 0) {
 			// 404
-			printf("bucket %s not found!\n", client->bucket_name),
+			zlog_error(zlog_object_store, "Bucket %s not found!", client->bucket_name),
 			client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
 			assert(client->response_size <= MAX_RESPONSE_SIZE);
 			snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
@@ -496,13 +496,13 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 			const char *errorPos;
 
 			if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
-				fprintf(stderr, "Parse uri fail: %s\n", errorPos);
+				zlog_error(zlog_object_store, "Parse uri fail: %s", errorPos);
 				return ;
 			}
 
 			if (uriDissectQueryMallocA(&queryList, &itemCount, uri.query.first, uri.query.afterLast) == URI_SUCCESS) {
 				for (struct UriQueryListStructA *query = queryList; query != NULL; query = query->next) {
-					fprintf(stdout, "query: (%s,%s)\n", query->key, query->value);
+					zlog_debug(zlog_object_store, "Query: (%s,%s)", query->key, query->value);
 					if (strcmp(query->key, "location") == 0) {
 						location = true;
 					}

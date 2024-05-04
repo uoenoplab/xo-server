@@ -366,7 +366,7 @@ static void *conn_wait(void *arg)
 
 	SSL_CTX *ssl_ctx = tls_init_ctx("./assets/server.crt", "./assets/server.key");
 	if (ssl_ctx == NULL) {
-		perror("tls_init_ctx");
+		zlog_fatal(zlog_tls, "tls_init_ctx failed");
 		exit(EXIT_FAILURE);
 	}
 
@@ -386,7 +386,7 @@ static void *conn_wait(void *arg)
 
 	// Create an epoll instance
 	if ((epoll_fd = epoll_create1(0)) == -1) {
-		perror("epoll_create1");
+		zlog_fatal(zlog_server, "epoll_create1(0) failed: %s", strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 
@@ -395,7 +395,7 @@ static void *conn_wait(void *arg)
 		// Add handoff_in read_domain_socket into epoll
 		handoff_in_listenfd = handoff_in_listen(param->thread_id);
 		if (handoff_in_listenfd == -1) {
-			perror("handoff_in_listen");
+			zlog_fatal(zlog_handoff, "handoff_in_listen failed: %s", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 		memset(&event, 0 , sizeof(event));
@@ -404,9 +404,8 @@ static void *conn_wait(void *arg)
 		handoff_in_ctxs[num_osds - 1].fd = handoff_in_listenfd;
 		event.events = EPOLLIN;
 		event.data.ptr = &handoff_in_ctxs[num_osds - 1];
-		zlog_info(zlog_server, "Register listenfd %d", param->thread_id, handoff_in_listenfd);
 		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, handoff_in_listenfd, &event) == -1) {
-			zlog_fatal(zlog_server, "Register listenfd %d failed: %s", strerror(errno));
+			zlog_fatal(zlog_handoff, "Register epoll for handoff_in_listenfd %d failed: %s", handoff_in_listenfd, strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 		for (int i = 0; i < num_peers; i++)
@@ -416,13 +415,12 @@ static void *conn_wait(void *arg)
 			handoff_out_ctxs[i].thread_id = param->thread_id;
 			handoff_out_ctxs[i].osd_arr_index = i;
 		}
-
 	}
 #endif
 
 	// Create a TCP socket
 	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-		perror("socket");
+		zlog_fatal(zlog_server, "Create server_fd failed: %s", strerror(errno)),
 		exit(EXIT_FAILURE);
 	}
 
@@ -460,8 +458,9 @@ static void *conn_wait(void *arg)
 	ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event);
 	assert(ret == 0);
 
-	zlog_debug(zlog_handoff, "HANDOFF_IN Ready to get accepted connections on fd %d port %d", handoff_in_listenfd, HANDOFF_CTRL_PORT + param->thread_id);
-	zlog_debug(zlog_server, "S3_HTTP Ready to accept connections on fd %d port %d", S3_HTTP_PORT, server_fd);
+	if (enable_migration)
+		zlog_debug(zlog_handoff, "HANDOFF_IN Ready to accept incoming handoff (fd=%d,port=%d)", handoff_in_listenfd, HANDOFF_CTRL_PORT + param->thread_id);
+	zlog_debug(zlog_server, "S3_HTTP Ready to accept HTTP(S) connections (fd=%d,port=%d)", server_fd, S3_HTTP_PORT);
 
 	while (server_running) {
 		// Wait for events using epoll
@@ -473,7 +472,7 @@ static void *conn_wait(void *arg)
 				continue;
 			}
 			else {
-				perror("epoll_wait");
+				zlog_fatal(zlog_server, "epoll_wait failed: %s", strerror(errno));
 				exit(EXIT_FAILURE);
 			}
 		}
@@ -484,41 +483,41 @@ static void *conn_wait(void *arg)
 				// Handle events using callback functions
 				struct http_client *c = (struct http_client *)events[i].data.ptr;
 				if (c->fd == server_fd) {
-					zlog_debug(zlog_server, "S3_HTTP_EVENT handle_new_connection");
 					handle_new_connection(epoll_fd, param->ifname, server_fd, thread_id);
+					zlog_debug(zlog_server, "S3_HTTP Accepted new connction");
 				} else if ((events[i].events & EPOLLERR) ||
 						   (events[i].events & EPOLLHUP) ||
 						   (events[i].events & EPOLLRDHUP)) {
-					zlog_error(zlog_server, "Thread %d S3_HTTP error event (fd %d events %d)",
-						param->thread_id, c->fd, events[i].events);
+					zlog_error(zlog_server, "S3_HTTP error event (fd=%d,events=%d)", c->fd, events[i].events);
 					handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
 				} else if (events[i].events & EPOLLOUT) {
-					zlog_debug(zlog_server, "S3_HTTP_EVENT send_client_data c->fd %d", c->fd);
 					ret = send_client_data(c);
+					zlog_debug(zlog_server, "S3_HTTP_EVENT send_client_data fd=%d", c->fd);
 					if (ret == -1) {
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
+						zlog_debug(zlog_server, "S3_HTTP_EVENT client disconnected after send_client_data");
 					}
 				} else if (events[i].events & EPOLLIN) {
 					zlog_debug(zlog_server, "S3_HTTP_EVENT handle_client_data");
 					ret = handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
 					if (ret == -1) {
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
+						zlog_debug(zlog_server, "S3_HTTP_EVENT client disconnected after send_client_disconnect");
 					}
 #ifdef USE_MIGRATION
 					// check if ret okay, connection could be closed
 					if (ret != -1 && enable_migration && c->to_migrate != -1) {
-						zlog_debug(zlog_handoff, "S3_HTTP_EVENT Need to migrate conn %d to OSD %d", c->fd, c->to_migrate);
+						zlog_debug(zlog_handoff, "S3_HTTP_EVENT To migrate conn (fd=%d,OSD=%d)", c->fd, c->to_migrate);
 						handoff_out_serialize(c);
-						zlog_debug(zlog_handoff, "HANDOFF_OUT serialized client on conn %d", c->fd);
+						zlog_debug(zlog_handoff, "HANDOFF_OUT Serialized client (fd=%d)", c->fd);
 						int osd_arr_index = get_arr_index_from_osd_id(c->to_migrate);
-						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c,
-							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
+						handoff_out_issue(epoll_fd, HANDOFF_OUT_EVENT, c, &handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
+						zlog_debug(zlog_handoff, "HANDOFF_OUT Issued for client (fd=%d)", c->fd);
 					}
 #endif
 				}
 				else {
-					zlog_error(zlog_server, "Thread %d S3_HTTP unhandled event (fd %d events %d)",
-						param->thread_id, c->fd, events[i].events);
+					zlog_error(zlog_server, "S3_HTTP unhandled event (fd %d events %d)", c->fd, events[i].events);
 				}
 			}
 #ifdef USE_MIGRATION
@@ -527,7 +526,7 @@ static void *conn_wait(void *arg)
 				in_ctx->data_io_ctx = data_io_ctx;
 				in_ctx->bucket_io_ctx = bucket_io_ctx;
 				if (in_ctx->fd == handoff_in_listenfd) {
-					zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT handoff_in_listenfd");
+					zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT Receiving incoming handoff events");
 					if (events[i].events & EPOLLIN) {
 						struct sockaddr_in in_addr;
 						socklen_t in_len = sizeof(in_addr);
@@ -555,9 +554,9 @@ static void *conn_wait(void *arg)
 						}
 
 						if (osd_arr_index < num_peers) {
-							zlog_info(zlog_handoff, "Accepted handoff_in fd %d (host %s, port %d, osd_id %d)", in_fd, osd_addr_strs[i], ntohs(in_addr.sin_port), osd_ids[i]);
+							zlog_info(zlog_handoff, "HANDOFF_IN_EVENT Accepted handoff_in fd %d (host=%s:%d,osd=%d)", in_fd, osd_addr_strs[i], ntohs(in_addr.sin_port), osd_ids[i]);
 						} else {
-							zlog_fatal(zlog_handoff, "Unkown handoff_in client %s, not in osd list, drop", inet_ntoa(in_addr.sin_addr));
+							zlog_fatal(zlog_handoff, "HANDOFF_IN_EVENT Unkown handoff_in client %s, not in osd list, drop", inet_ntoa(in_addr.sin_addr));
 							close(in_fd);
 							exit(EXIT_FAILURE);
 						}
@@ -566,7 +565,7 @@ static void *conn_wait(void *arg)
 
 						if (handoff_in_ctxs[osd_arr_index].fd != 0) {
 							// main thread will close old fd and cause global epoll list delete
-							zlog_debug(zlog_handoff, "HANDOFF_IN receives a new conn %d and overwrites old conn %d (osd id %d)",
+							zlog_debug(zlog_handoff, "HANDOFF_IN Received a new conn fd=%d and overwrites old conn fd=%d (osd=%d)",
 								in_fd, handoff_in_ctxs[osd_arr_index].fd, osd_ids[osd_arr_index]);
 							close(handoff_in_ctxs[osd_arr_index].fd);
 						}
@@ -585,15 +584,12 @@ static void *conn_wait(void *arg)
 						ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event);
 						assert(ret == 0);
 					} else {
-						zlog_debug(zlog_handoff, "Thread %d HANDOFF_IN unhanlded event on handoff_in_listenfd %d (events %d)",
-							param->thread_id, handoff_in_listenfd, events[i].events);
+						zlog_error(zlog_handoff, "HANDOFF_IN Unhandled event on (handoff_in_listenfd=%d,events=%d)", handoff_in_listenfd, events[i].events);
 					}
 				} else if ((events[i].events & EPOLLERR) ||
 						   (events[i].events & EPOLLHUP) ||
 						   (events[i].events & EPOLLRDHUP)){
-					zlog_debug(zlog_handoff, "HANDOFF_IN received err/hup event"
-							"on conn %d close now (events %d osd id %d)",
-							in_ctx->fd, events[i].events, osd_ids[in_ctx->osd_arr_index]);
+					zlog_error(zlog_handoff, "HANDOFF_IN received err/hup event, closing (fd=%d,events=%d,osd=%d)", in_ctx->fd, events[i].events, osd_ids[in_ctx->osd_arr_index]);
 					handoff_in_disconnect(in_ctx);
 				} else if (events[i].events & EPOLLIN) {
 					zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT handoff_in_recv");
@@ -601,11 +597,11 @@ static void *conn_wait(void *arg)
 					struct http_client *client_to_handoff_again = NULL;
 					handoff_in_recv(in_ctx, &ready_to_send, &client_to_handoff_again);
 					if (ready_to_send) {
-						zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT handoff_in_send ready to send");
+						zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT handoff_in_recv ready to send");
 						handoff_in_send(in_ctx);
 					}
 					if (client_to_handoff_again) {
-						zlog_debug(zlog_handoff, "HANDOFF_IN we need to re-handoff to osd id %d", client_to_handoff_again->to_migrate);
+						zlog_debug(zlog_handoff, "HANDOFF_IN TO re-handoff to (fd=%d,osd=%d)", client_to_handoff_again->fd, client_to_handoff_again->to_migrate);
 						int osd_arr_index = get_arr_index_from_osd_id(client_to_handoff_again->to_migrate);
 						handoff_out_issue_urgent(epoll_fd, HANDOFF_OUT_EVENT, client_to_handoff_again,
 							&handoff_out_ctxs[osd_arr_index], osd_arr_index, param->thread_id);
@@ -615,14 +611,14 @@ static void *conn_wait(void *arg)
 					handoff_in_send(in_ctx);
 				}
 				else {
-					zlog_debug(zlog_handoff, "HANDOFF_IN unhandled event (fd %d events %d)", in_ctx->fd, events[i].events);
+					zlog_error(zlog_handoff, "HANDOFF_IN Unhandled event (fd=%d,events=%d)", in_ctx->fd, events[i].events);
 				}
 			} else if (enable_migration && epoll_data_u32 == HANDOFF_OUT_EVENT) {
 				struct handoff_out *out_ctx = (struct handoff_out *)events[i].data.ptr;
 				if ((events[i].events & EPOLLERR) ||
 					(events[i].events & EPOLLHUP) ||
 					(events[i].events & EPOLLRDHUP)) {
-					zlog_debug(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_reconnect");
+					zlog_error(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_reconnect");
 					// means current connection is broken
 					handoff_out_reconnect(out_ctx);
 				} else if (events[i].events & EPOLLOUT) {
@@ -638,12 +634,12 @@ static void *conn_wait(void *arg)
 					handoff_out_recv(out_ctx);
 				}
 				else {
-					zlog_debug(zlog_handoff, "HANDOFF_OUT unhandled event (fd %d events %d)", events[i].data.fd, events[i].events);
+					zlog_error(zlog_handoff, "HANDOFF_OUT Unhandled event (fd=%d,events=%d)", events[i].data.fd, events[i].events);
 				}
 			}
 #endif
 			else {
-				zlog_error(zlog_server, "Unhandled event (events %d data.u32 %d)", events[i].events, epoll_data_u32);
+				zlog_error(zlog_server, "Unhandled event (events=%d,data.u32=%d)", events[i].events, epoll_data_u32);
 			}
 		}
 	}

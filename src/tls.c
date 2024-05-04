@@ -114,7 +114,7 @@ void keylog_callback(const SSL *ssl, const char *line)
 
 static inline void print_ssl_state(SSL *ssl)
 {
-	printf("SSL-STATE: %s\n", SSL_state_string_long(ssl));
+	zlog_debug(zlog_tls, "SSL-STATE: %s", SSL_state_string_long(ssl));
 }
 
 static inline void print_ssl_error(const char *msg)
@@ -226,7 +226,7 @@ SSL_CTX *tls_init_ctx(const char *certfile, const char *keyfile)
 			goto err;
 		}
 
-		zlog_debug(zlog_tls, "certificate and private key loaded and verified");
+		//zlog_debug(zlog_tls, "certificate and private key loaded and verified");
 	}
 
 	// Enable all bug workarounds, only also TLS 1.3
@@ -470,7 +470,7 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 
 	if (ret == SSL_ERROR_NONE) {
 		client->tls.is_handshake_done = true;
-		printf("Handshake Done - TLS Version: %s, TLS Cipher: %s\n", SSL_get_version(client->tls.ssl), SSL_get_cipher(client->tls.ssl));
+		zlog_info(zlog_tls, "Handshake Done - TLS Version: %s, TLS Cipher: %s", SSL_get_version(client->tls.ssl), SSL_get_cipher(client->tls.ssl));
 
 		// printf("BIO_pending(client->tls.rbio) %d SSL_has_pending(client->tls.ssl) %d\n",
 		// 	BIO_pending(client->tls.rbio), SSL_has_pending(client->tls.ssl));

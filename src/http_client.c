@@ -323,11 +323,9 @@ static int on_headers_complete_cb(llhttp_t* parser)
 					client->to_migrate = client->from_migrate;
 				}
 			}
-#ifdef DEBUG
-			printf("/%s/%s in osd.%d to migrate %d\n",
+			zlog_debug(zlog_object_store, "/%s/%s in osd.%d to migrate %d",
 				client->bucket_name, client->object_name,
 				client->acting_primary_osd_id, client->to_migrate);
-#endif
 
 #ifdef USE_MIGRATION
 			if (client->to_migrate != -1) return 0;
