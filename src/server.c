@@ -134,12 +134,13 @@ static int get_mac_address(const char *ifname, struct sockaddr_in addr, uint8_t 
 
     if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("socket failed");
+        zlog_error(zlog_server, "socket creation failed: %s", strerror(errno));
         return -1;
     }
 
     strncpy(arp_req.arp_dev, ifname, IFNAMSIZ-1);
     if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
-        perror("ioctl SIOCGARP failed");
+        zlog_error(zlog_server, "ioctl SIOCGARP failed: %s", strerror(errno));
         close(sock_fd);
         return -1;
     }
@@ -177,7 +178,7 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	// Accept a new client connection
 	new_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
 	if (new_socket == -1) {
-		perror("accept");
+        	zlog_error(zlog_server, "Fail to accept new client connection: %s", strerror(errno));
 		return;
 	}
 
@@ -207,7 +208,7 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	set_socket_non_blocking(new_socket);
 
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &event) == -1) {
-		perror("handle_new_connection: epoll_ctl");
+        	zlog_error(zlog_server, "Fail to add new client conn to epoll: %s", strerror(errno));
 		close(new_socket);
 		free_http_client(client);
 	}
@@ -492,17 +493,17 @@ static void *conn_wait(void *arg)
 					handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
 				} else if (events[i].events & EPOLLOUT) {
 					ret = send_client_data(c);
-					zlog_debug(zlog_server, "S3_HTTP_EVENT send_client_data fd=%d", c->fd);
+					zlog_debug(zlog_server, "S3_HTTP_EVENT send_client_data (fd=%d)", c->fd);
 					if (ret == -1) {
+						zlog_debug(zlog_server, "S3_HTTP_EVENT client disconnected after send_client_data (fd=%d)", c->fd);
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
-						zlog_debug(zlog_server, "S3_HTTP_EVENT client disconnected after send_client_data");
 					}
 				} else if (events[i].events & EPOLLIN) {
 					zlog_debug(zlog_server, "S3_HTTP_EVENT handle_client_data");
 					ret = handle_client_data(epoll_fd, c, client_data_buffer, thread_id, bucket_io_ctx, data_io_ctx, ssl_ctx);
 					if (ret == -1) {
+						zlog_debug(zlog_server, "S3_HTTP_EVENT client disconnected after send_client_disconnect (fd=%d)", c->fd);
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
-						zlog_debug(zlog_server, "S3_HTTP_EVENT client disconnected after send_client_disconnect");
 					}
 #ifdef USE_MIGRATION
 					// check if ret okay, connection could be closed
@@ -526,7 +527,7 @@ static void *conn_wait(void *arg)
 				in_ctx->data_io_ctx = data_io_ctx;
 				in_ctx->bucket_io_ctx = bucket_io_ctx;
 				if (in_ctx->fd == handoff_in_listenfd) {
-					zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT Receiving incoming handoff events");
+					zlog_debug(zlog_handoff, "HANDOFF_IN_EVENT Receiving incoming handoff event");
 					if (events[i].events & EPOLLIN) {
 						struct sockaddr_in in_addr;
 						socklen_t in_len = sizeof(in_addr);
@@ -554,7 +555,7 @@ static void *conn_wait(void *arg)
 						}
 
 						if (osd_arr_index < num_peers) {
-							zlog_info(zlog_handoff, "HANDOFF_IN_EVENT Accepted handoff_in fd %d (host=%s:%d,osd=%d)", in_fd, osd_addr_strs[i], ntohs(in_addr.sin_port), osd_ids[i]);
+							zlog_info(zlog_handoff, "HANDOFF_IN_EVENT Accepted handoff_in (in_fd=%d,host=%s:%d,osd=%d)", in_fd, osd_addr_strs[i], ntohs(in_addr.sin_port), osd_ids[i]);
 						} else {
 							zlog_fatal(zlog_handoff, "HANDOFF_IN_EVENT Unkown handoff_in client %s, not in osd list, drop", inet_ntoa(in_addr.sin_addr));
 							close(in_fd);
@@ -565,7 +566,7 @@ static void *conn_wait(void *arg)
 
 						if (handoff_in_ctxs[osd_arr_index].fd != 0) {
 							// main thread will close old fd and cause global epoll list delete
-							zlog_debug(zlog_handoff, "HANDOFF_IN Received a new conn fd=%d and overwrites old conn fd=%d (osd=%d)",
+							zlog_debug(zlog_handoff, "HANDOFF_IN Received a new conn fd=%d and overwrites old conn (in_fd=%d,osd=%d)",
 								in_fd, handoff_in_ctxs[osd_arr_index].fd, osd_ids[osd_arr_index]);
 							close(handoff_in_ctxs[osd_arr_index].fd);
 						}
@@ -611,7 +612,7 @@ static void *conn_wait(void *arg)
 					handoff_in_send(in_ctx);
 				}
 				else {
-					zlog_error(zlog_handoff, "HANDOFF_IN Unhandled event (fd=%d,events=%d)", in_ctx->fd, events[i].events);
+					zlog_error(zlog_handoff, "HANDOFF_IN Unhandled event (in_ctx->fd=%d,events=%d)", in_ctx->fd, events[i].events);
 				}
 			} else if (enable_migration && epoll_data_u32 == HANDOFF_OUT_EVENT) {
 				struct handoff_out *out_ctx = (struct handoff_out *)events[i].data.ptr;
@@ -622,19 +623,19 @@ static void *conn_wait(void *arg)
 					// means current connection is broken
 					handoff_out_reconnect(out_ctx);
 				} else if (events[i].events & EPOLLOUT) {
-					zlog_debug(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_send");
+					zlog_debug(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_send (out_ctx->fd=%d)", out_ctx->fd);
 					if (out_ctx->is_fd_connected) {
 						handoff_out_send(out_ctx);
 					} else {
 						handoff_out_reconnect(out_ctx);
 					}
 				} else if (events[i].events & EPOLLIN) {
-					zlog_debug(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_recv");
+					zlog_debug(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_recv (out_ctx->fd=%d,fd=%d", out_ctx->fd, out_ctx->client->fd);
 					// handle handoff response, if all received, then swtich back to epollout
 					handoff_out_recv(out_ctx);
 				}
 				else {
-					zlog_error(zlog_handoff, "HANDOFF_OUT Unhandled event (fd=%d,events=%d)", events[i].data.fd, events[i].events);
+					zlog_error(zlog_handoff, "HANDOFF_OUT Unhandled event (out_ctx->fd=%d,events=%d)", events[i].data.fd, events[i].events);
 				}
 			}
 #endif

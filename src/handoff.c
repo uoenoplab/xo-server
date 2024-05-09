@@ -208,7 +208,7 @@ void handoff_out_serialize_reset(struct http_client *client)
 				client->client_addr, client->client_mac, self_sin.sin_addr.s_addr, my_mac,
 				client->client_port, self_sin.sin_port, true);
 	assert(ret == 0);
-	zlog_debug(zlog_handoff, "Applied blocking with eBPF (%d,%d)", ntohs(client->client_port), ntohs(self_sin.sin_port));
+	zlog_debug(zlog_handoff, "Applied blocking with eBPF (%d,%d) (fd=%d)", ntohs(client->client_port), ntohs(self_sin.sin_port), client->fd);
 
 	// build reset proto_buf
 	SocketSerialize migration_info_reset = SOCKET_SERIALIZE__INIT;
@@ -219,9 +219,9 @@ void handoff_out_serialize_reset(struct http_client *client)
 	migration_info_reset.peer_addr = client->client_addr;
 	migration_info_reset.peer_port = client->client_port;
 
-	zlog_debug(zlog_handoff, "Serializing connection: client(%" PRIu64 ":%d) server(%" PRIu64 ":%d)",
+	zlog_debug(zlog_handoff, "Serializing connection: client(%" PRIu64 ":%d) server(%" PRIu64 ":%d) (fd=%d)",
 		migration_info_reset.peer_addr, ntohs(migration_info_reset.peer_port),
-		migration_info_reset.self_addr, ntohs(migration_info_reset.self_port));
+		migration_info_reset.self_addr, ntohs(migration_info_reset.self_port), client->fd);
 
 	int proto_len = socket_serialize__get_packed_size(&migration_info_reset);
 	uint32_t net_proto_len = htonl(proto_len);
@@ -249,7 +249,7 @@ static void handoff_out_serialize_rehandoff(struct http_client **client_to_hando
 			migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac, get_my_osd_addr().sin_addr.s_addr, my_mac,
 			migration_info->peer_port, migration_info->self_port, true);
 	assert(ret == 0);
-	zlog_debug(zlog_handoff, "Applied blocking with eBPF (%d,%d)", ntohs(migration_info->peer_port), ntohs(migration_info->self_port));
+	zlog_debug(zlog_handoff, "Applied blocking with eBPF (%d,%d) (fd=%d)", ntohs(migration_info->peer_port), ntohs(migration_info->self_port), 0);
 
 	// we set fd as 0 so it will not considered as reset handoff
 	struct http_client *client = create_http_client(-1, 0);
@@ -296,7 +296,7 @@ void handoff_out_serialize(struct http_client *client)
 				client->client_addr, client->client_mac, self_sin.sin_addr.s_addr, my_mac,
 				client->client_port, self_sin.sin_port, true);
 	assert(ret == 0);
-	zlog_debug(zlog_handoff, "Applied blocking with eBPF (%d,%d)", ntohs(client->client_port), ntohs(self_sin.sin_port));
+	zlog_debug(zlog_handoff, "Applied blocking with eBPF (%d,%d) (fd=%d)", ntohs(client->client_port), ntohs(self_sin.sin_port), client->fd);
 
 	ret = setsockopt(fd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
 	assert(ret == 0);
@@ -373,13 +373,13 @@ void handoff_out_serialize(struct http_client *client)
 
 		socklen_t optlen = sizeof(struct tls12_crypto_info_aes_gcm_256);
 		if (getsockopt(fd, SOL_TLS, TLS_TX, crypto_info_send, &optlen)) {
-			zlog_fatal(zlog_tls, "Couldn't get TLS_TX option (%s)", strerror(errno));
+			zlog_fatal(zlog_tls, "Couldn't get TLS_TX option (%s) (fd=%d)", strerror(errno), client->fd);
 			exit(EXIT_FAILURE);
 		}
 
 		optlen = sizeof(struct tls12_crypto_info_aes_gcm_256);
 		if (getsockopt(fd, SOL_TLS, TLS_RX, crypto_info_recv, &optlen)) {
-			zlog_fatal(zlog_tls, "Couldn't get TLS_RX option (%s)", strerror(errno));
+			zlog_fatal(zlog_tls, "Couldn't get TLS_RX option (%s) (fd=%d)", strerror(errno), client->fd);
 			exit(EXIT_FAILURE);
 		}
 	}
@@ -502,7 +502,7 @@ void handoff_out_connect(struct handoff_out *out_ctx) {
 	out_addr.sin_port = htons(HANDOFF_CTRL_PORT + out_ctx->thread_id);
 	if (connect(out_ctx->fd, (struct sockaddr*)&out_addr, sizeof(out_addr)) == -1) {
 		if (errno != EINPROGRESS) {
-			zlog_fatal(zlog_handoff, "Failed to connect to OSD %d (fd=%d): %s", osd_ids[out_ctx->osd_arr_index], out_ctx->fd, strerror(errno));
+			zlog_fatal(zlog_handoff, "Failed to connect to OSD %d (out_ctx->fd=%d): %s", osd_ids[out_ctx->osd_arr_index], out_ctx->fd, strerror(errno));
 			close(out_ctx->fd);
 			exit(EXIT_FAILURE);
 		}
@@ -610,11 +610,11 @@ static void do_handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct h
 
 	if (urgent) {
 		handoff_out_enqueue_front(out_ctx->queue, client);
-		zlog_debug(zlog_handoff, "HANDOFF_OUT (front)enqueued (backlog=%d) Migration (OSD=%d,conn=%d)",
+		zlog_debug(zlog_handoff, "HANDOFF_OUT (front)enqueued (backlog=%d) Migration (OSD=%d,fd=%d)",
 			out_ctx->queue->num_requests, osd_ids[out_ctx->osd_arr_index], client->fd);
 	} else {
 		handoff_out_enqueue(out_ctx->queue, client);
-		zlog_debug(zlog_handoff, "HANDOFF_OUT enqueued (backlog=%d) Migration (OSD=%d,conn=%d)",
+		zlog_debug(zlog_handoff, "HANDOFF_OUT enqueued (backlog=%d) Migration (OSD=%d,fd=%d)",
 			out_ctx->queue->num_requests, osd_ids[out_ctx->osd_arr_index], client->fd);
 	}
 
@@ -638,7 +638,7 @@ static void do_handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct h
 	event.data.ptr = out_ctx;
 	event.events = EPOLLOUT;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, out_ctx->fd, &event) == -1) {
-		zlog_fatal(zlog_handoff, "HANDOFF_OUT Failed to add control conn to epoll (fd=%d,osd=%d): %s", out_ctx->fd, osd_ids[out_ctx->osd_arr_index], strerror(errno));
+		zlog_fatal(zlog_handoff, "HANDOFF_OUT Failed to add control conn to epoll (out_ctx->fd=%d,fd=%d,osd=%d): %s", out_ctx->fd, client->fd, osd_ids[out_ctx->osd_arr_index], strerror(errno));
 		close(out_ctx->fd);
 		exit(EXIT_FAILURE);
 	}
@@ -681,13 +681,13 @@ void handoff_out_send(struct handoff_out *out_ctx)
 		handoff_out_dequeue(out_ctx->queue, (void **)&out_ctx->client);
 	}
 
-	zlog_debug(zlog_handoff, "HANDOFF_OUT dequeued (backlog %d) Migration work (OSD=%d,conn=%d)",
-		out_ctx->queue->num_requests, out_ctx->client->to_migrate, out_ctx->client->fd);
+	zlog_debug(zlog_handoff, "HANDOFF_OUT dequeued (backlog %d) Migration work (OSD=%d,out_ctx->fd=%d,fd=%d)",
+		out_ctx->queue->num_requests, out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd);
 
 	int ret = send(out_ctx->fd, out_ctx->client->proto_buf + out_ctx->client->proto_buf_sent,
 		out_ctx->client->proto_buf_len - out_ctx->client->proto_buf_sent, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
-		zlog_error(zlog_handoff, "handoff_out_send send error %d errmsg %s", errno, strerror(errno));
+		zlog_error(zlog_handoff, "handoff_out_send send error (%d): %s", errno, strerror(errno));
 		handoff_out_reconnect(out_ctx);
 		return;
 	}
@@ -699,7 +699,7 @@ void handoff_out_send(struct handoff_out *out_ctx)
 
 	// send done
 	if (out_ctx->client->proto_buf_len == out_ctx->client->proto_buf_sent) {
-		zlog_debug(zlog_handoff, "HANDOFF_OUT migration request sent (OSD=%d,conn=%d)", out_ctx->client->to_migrate, out_ctx->client->fd);
+		zlog_debug(zlog_handoff, "HANDOFF_OUT migration request sent (OSD=%d,fd=%d)", out_ctx->client->to_migrate, out_ctx->client->fd);
 
 		if (out_ctx->client->proto_buf != NULL) {
 			free(out_ctx->client->proto_buf);
@@ -711,7 +711,7 @@ void handoff_out_send(struct handoff_out *out_ctx)
 		event.data.ptr = out_ctx;
 		event.events = EPOLLIN;
 		if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_MOD, out_ctx->fd, &event) == -1) {
-			zlog_fatal(zlog_handoff, "Change control socket to receive failed (out_ctx->fd=%d): %s", out_ctx->fd, strerror(errno));
+			zlog_fatal(zlog_handoff, "Change control socket to receive failed (out_ctx->fd=%d,fd=%d): %s", out_ctx->fd, out_ctx->client->fd, strerror(errno));
 			close(out_ctx->fd);
 			exit(EXIT_FAILURE);
 		}
@@ -720,7 +720,7 @@ void handoff_out_send(struct handoff_out *out_ctx)
 
 static void handoff_out_send_done(struct handoff_out *out_ctx)
 {
-	zlog_debug(zlog_handoff, "HANDOFF_OUT send done (osd=%d)", osd_ids[out_ctx->osd_arr_index]);
+	zlog_debug(zlog_handoff, "HANDOFF_OUT send done (osd=%d,out_ctx->fd=%d,fd=%d)", osd_ids[out_ctx->osd_arr_index], out_ctx->fd, out_ctx->client->fd);
 
 	uint32_t magic_number = UINT32_MAX;
 	int ret = send(out_ctx->fd, &magic_number,
@@ -770,7 +770,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	if (out_ctx->recv_protobuf_received < out_ctx->recv_protobuf_len)
 		return;
 
-	zlog_debug(zlog_handoff, "HANDOFF_OUT Received response for migration request (osd=%d,conn=%d)", out_ctx->client->to_migrate, out_ctx->client->fd);
+	zlog_debug(zlog_handoff, "HANDOFF_OUT Received response for migration request (osd=%d,out_ctx->fd=%d,fd=%d)", out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd);
 
 	SocketSerialize *migration_info = socket_serialize__unpack(NULL,
 		out_ctx->recv_protobuf_len, out_ctx->recv_protobuf);
@@ -807,8 +807,8 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 #endif
 		assert(ret == 0);
 
-		zlog_debug(zlog_handoff, "HANDOFF_OUT Apply redirection rule (osd=%d,conn=%d) client(%" PRIu64 ":%d) server(%" PRIu64 ":%d) to fake server(%u:%d)",
-				out_ctx->client->to_migrate, out_ctx->client->fd,
+		zlog_debug(zlog_handoff, "HANDOFF_OUT Apply redirection rule (osd=%d,out_ctx->fd=%d,fd=%d) client(%" PRIu64 ":%d) server(%" PRIu64 ":%d) to fake server(%u:%d)",
+				out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd,
 				migration_info->peer_addr, ntohs(migration_info->peer_port),
 				migration_info->self_addr, ntohs(migration_info->self_port),
 				osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, ntohs(migration_info->self_port));
@@ -832,10 +832,11 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
 				migration_info->peer_port, migration_info->self_port);
 	assert(ret == 0);
-	zlog_debug(zlog_handoff, "HANDOFF_OUT Removed blocking rule (osd=%d,client=%" PRIu64 ":%d,original_server=%" PRIu64 ":%d)",
+	zlog_debug(zlog_handoff, "HANDOFF_OUT Removed blocking rule (osd=%d,client=%" PRIu64 ":%d,original_server=%" PRIu64 ":%d,out_ctx->fd=%d,fd=%d)",
 		out_ctx->client->to_migrate,
 		migration_info->peer_addr, ntohs(migration_info->peer_port),
-		migration_info->self_addr, ntohs(migration_info->self_port));
+		migration_info->self_addr, ntohs(migration_info->self_port),
+		out_ctx->fd, out_ctx->client->fd);
 #endif
 	// }
 
@@ -848,7 +849,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 
 	if (handoff_out_queue_is_empty(out_ctx->queue)) {
 		if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_DEL, out_ctx->fd, NULL) == -1) {
-			zlog_fatal(zlog_handoff, "Failed to remove control connection from epoll (fd=%d): %s", out_ctx->fd, strerror(errno));
+			zlog_fatal(zlog_handoff, "Failed to remove control connection from epoll (out_ctx->fd=%d,fd=%d): %s", out_ctx->fd, out_ctx->client->fd, strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 		zlog_debug(zlog_handoff, "Set is_fd_in_epoll to false");
@@ -859,7 +860,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		event.data.ptr = out_ctx;
 		event.events = EPOLLOUT;
 		if (epoll_ctl(out_ctx->epoll_fd, EPOLL_CTL_MOD, out_ctx->fd, &event) == -1) {
-			zlog_fatal(zlog_handoff, "Failed to set control socket to send mode (fd=%d): %s", out_ctx->fd, strerror(errno));
+			zlog_fatal(zlog_handoff, "Failed to set control socket to send mode (out_ctx->fd=%d,fd=%d): %s", out_ctx->fd, out_ctx->client->fd, strerror(errno));
 			close(out_ctx->fd);
 			exit(EXIT_FAILURE);
 		}
@@ -910,24 +911,21 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 
 	ret = bind(rfd, (struct sockaddr *)&server_sin, sizeof(server_sin));
 	assert(ret == 0);
-	ret = connect(rfd, (struct sockaddr *)&client_sin, sizeof(client_sin));
-	assert(ret == 0);
-
 	socklen_t new_ulen = migration_info->unsentq_len;
 	socklen_t new_len = migration_info->sendq.len - new_ulen;
 
-	//zlog_debug(zlog_handoff, "restore send q: new_ulen %d new_len %d recvq len %d", new_ulen, new_len, migration_info->recvq.len);
+	zlog_debug(zlog_handoff, "restore send q: new_ulen %d new_len %d recvq len %d (rfd=%d)", new_ulen, new_len, migration_info->recvq.len, rfd);
 	if (new_len) {
 		ret = restore_queue(rfd, TCP_SEND_QUEUE, (const uint8_t *)migration_info->sendq.data, new_len, 1);
 		assert(ret == 0);
 	}
 	if (new_ulen) {
-		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(-1));
-		assert(ret == 0);
+		//ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(-1));
+		//assert(ret == 0);
 		ret = restore_queue(rfd, TCP_SEND_QUEUE, (const uint8_t *)migration_info->sendq.data + new_len, new_ulen, 0);
 		assert(ret == 0);
-		ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
-		assert(ret == 0);
+		//ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
+		//assert(ret == 0);
 	}
 	if (migration_info->recvq.len > 0) {
 		ret = restore_queue(rfd, TCP_RECV_QUEUE, (const uint8_t *)migration_info->recvq.data, migration_info->recvq.len, 1);
@@ -959,6 +957,9 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &new_window, sizeof(new_window));
 	assert(ret == 0);
 
+	ret = connect(rfd, (struct sockaddr *)&client_sin, sizeof(client_sin));
+	assert(ret == 0);
+
 	if (migration_info->ktlsbuf.len != 0) {
 		if (migration_info->ktlsbuf.len != 2 * sizeof(struct tls12_crypto_info_aes_gcm_256)) {
 			zlog_fatal(zlog_tls, "incorrect ktlsbuf length (%ld)", migration_info->ktlsbuf.len);
@@ -972,6 +973,7 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 			zlog_fatal(zlog_tls, "set ULP tls fail (%s)", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
+
 		if (setsockopt(rfd, SOL_TLS, TLS_TX, crypto_info_send,
 						sizeof(*crypto_info_send)) < 0) {
 			zlog_fatal(zlog_tls, "Couldn't set TLS_TX option (%s)", strerror(errno));
@@ -1063,7 +1065,7 @@ int handoff_in_listen(int thread_id)
 // anyways
 static void handoff_in_recv_done(struct handoff_in *in_ctx) {
 
-	zlog_debug(zlog_handoff, "HANDOFF_IN Recevied incoming migration message (osd=%d)", osd_ids[in_ctx->osd_arr_index]);
+	zlog_debug(zlog_handoff, "HANDOFF_IN Recevied ready to redirect message from original server (osd=%d,in_ctx->fd=%d)", osd_ids[in_ctx->osd_arr_index], in_ctx->fd);
 
 	struct http_client *client = in_ctx->client_for_originaldone;
 
@@ -1161,21 +1163,21 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 
 	if (migration_info->msg_type == HANDOFF_REQUEST) {
 		handoff_in_deserialize(in_ctx, migration_info);
-		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Deserialize connection");
+		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Deserialize connection (in_ctx->fd=%d)", in_ctx->fd);
 		// apply src IP modification
 		ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port,
 					migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
 					migration_info->self_port, migration_info->peer_port, false, false);
 		assert(ret == 0);
-		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Applied source IP modification");
+		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Applied source IP modification (in_ctx->fd=%d)", in_ctx->fd);
 	} else if (migration_info->msg_type == HANDOFF_BACK_REQUEST) {
 		if (migration_info->acting_primary_osd_id == get_my_osd_id()) {
-			zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Migration target is current node, deserialize");
+			zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Migration target is current node, deserialize (in_ctx->fd=%d)", in_ctx->fd);
 			handoff_in_deserialize(in_ctx, migration_info);
 		} else {
-			zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Migration target is not current node, rehandoff to target (osd=%d)",
-				migration_info->acting_primary_osd_id);
+			zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Migration target is not current node, rehandoff to target (osd=%d,in_ctx->fd=%d)", 
+				migration_info->acting_primary_osd_id, in_ctx->fd);
 
 			handoff_out_serialize_rehandoff(&in_ctx->client_to_handoff_again, migration_info);
 		}
@@ -1243,7 +1245,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 	event.data.ptr = in_ctx;
 	event.events = EPOLLOUT | EPOLLRDHUP;
 	if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_MOD, in_ctx->fd, &event) == -1) {
-		zlog_fatal(zlog_handoff, "Failed to change socket fd=%d to send mode: %s", in_ctx->fd, strerror(errno));
+		zlog_fatal(zlog_handoff, "Failed to change socket in_ctx->fd=%d to send mode: %s", in_ctx->fd, strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 
@@ -1254,7 +1256,7 @@ void handoff_in_send(struct handoff_in *in_ctx) {
 	int ret = send(in_ctx->fd, in_ctx->send_protobuf + in_ctx->send_protobuf_sent,
 		in_ctx->send_protobuf_len - in_ctx->send_protobuf_sent, 0);
 	if ((ret == 0) || (ret == -1 && errno != EAGAIN)) {
-		zlog_fatal(zlog_handoff, "Failed to send protobuf len fd=%d: %s", in_ctx->fd, strerror(errno));
+		zlog_fatal(zlog_handoff, "Failed to send protobuf len in_ctx->fd=%d: %s", in_ctx->fd, strerror(errno));
 		handoff_in_disconnect(in_ctx);
 		return;
 	}
@@ -1265,11 +1267,11 @@ void handoff_in_send(struct handoff_in *in_ctx) {
 	in_ctx->send_protobuf_sent += ret;
 
 	if (in_ctx->send_protobuf_sent < in_ctx->send_protobuf_len) {
-		zlog_debug(zlog_handoff, "HANDOFF_IN sent response to migration request %d/%d (osd=%d)",
-			in_ctx->send_protobuf_sent, in_ctx->send_protobuf_len, osd_ids[in_ctx->osd_arr_index]);
+		zlog_debug(zlog_handoff, "HANDOFF_IN sent response to migration request %d/%d (osd=%d,in_ctx->fd=%d)",
+			in_ctx->send_protobuf_sent, in_ctx->send_protobuf_len, osd_ids[in_ctx->osd_arr_index], in_ctx->fd);
 		return;
 	}
-	zlog_debug(zlog_handoff, "HANDOFF_IN all response to migration request sent (osd=%d)", osd_ids[in_ctx->osd_arr_index]);
+	zlog_debug(zlog_handoff, "HANDOFF_IN all response to migration request sent (osd=%d,in_ctx->fd=%d)", osd_ids[in_ctx->osd_arr_index], in_ctx->fd);
 
 	// send done
 	if (in_ctx->send_protobuf != NULL) {
@@ -1283,14 +1285,14 @@ void handoff_in_send(struct handoff_in *in_ctx) {
 	event.data.ptr = in_ctx;
 	event.events = EPOLLIN | EPOLLRDHUP;
 	if (epoll_ctl(in_ctx->epoll_fd, EPOLL_CTL_MOD, in_ctx->fd, &event) == -1) {
-		zlog_fatal(zlog_handoff, "Fail to set socket back to receive mode (fd=%d): %s", in_ctx->fd, strerror(errno));
+		zlog_fatal(zlog_handoff, "Fail to set socket back to receive mode (in_ctx->fd=%d): %s", in_ctx->fd, strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 }
 
 void handoff_in_disconnect(struct handoff_in *in_ctx)
 {
-	zlog_info(zlog_handoff, "Disconnecting incoming handoff control socket (fd=%d)", in_ctx->fd);
+	zlog_info(zlog_handoff, "Disconnecting incoming handoff control socket (in_ctx->fd=%d)", in_ctx->fd);
 	close(in_ctx->fd);
 	in_ctx->fd = 0;
 }

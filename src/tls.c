@@ -11,6 +11,9 @@
 #include "tls.h"
 #include "util.h"
 
+#define print_ssl_state(ssl) zlog_debug(zlog_tls, "SSL-STATE: %s", SSL_state_string_long(ssl));
+
+
 zlog_category_t *zlog_tls;
 
 //static void __attribute_maybe_unused__ hexdump(const char *title, void *buf, size_t len)
@@ -110,11 +113,6 @@ void keylog_callback(const SSL *ssl, const char *line)
 		//	sizeof(client->tls.server_traffic_secret));
 		client->tls.is_server_traffic_secret_set = true;
 	}
-}
-
-static inline void print_ssl_state(SSL *ssl)
-{
-	zlog_debug(zlog_tls, "SSL-STATE: %s", SSL_state_string_long(ssl));
 }
 
 static inline void print_ssl_error(const char *msg)
@@ -316,25 +314,25 @@ int tls_init_client(SSL_CTX *ctx, struct http_client *client, char *buf, ssize_t
 
 	client->tls.rbio = BIO_new(BIO_s_mem());
 	if (client->tls.rbio == NULL) {
-		fprintf(stderr, "%s: BIO_new failed\n", __func__);
+		zlog_error(zlog_tls, "BIO_new for rbio failed (fd=%d)", client->fd);
 		goto err_rbio;
 	}
 
 	client->tls.wbio = BIO_new(BIO_s_mem());
 	if (client->tls.wbio == NULL) {
-		fprintf(stderr, "%s: BIO_new failed\n", __func__);
+		zlog_error(zlog_tls, "BIO_new for wbio failed (fd=%d)", client->fd);
 		goto err_wbio;
 	}
 
 	client->tls.ssl = SSL_new(ctx);
 	if (client->tls.ssl == NULL) {
-		fprintf(stderr, "%s: BIO_new failed\n", __func__);
+		zlog_error(zlog_tls, "BIO_new for ssl failed (fd=%d)", client->fd);
 		goto err_ssl_new;
 	}
 
 	SSL_set_app_data(client->tls.ssl, client);
 	if (SSL_get_app_data(client->tls.ssl) != client) {
-		fprintf(stderr, "%s: SSL_set_app_data failed\n", __func__);
+		zlog_error(zlog_tls, "SSL_set_app_data failed (fd=%d)", client->fd);
 		goto err;
 	}
 
@@ -387,14 +385,14 @@ static int tls_make_ktls(struct http_client *client, uint64_t recv_rec_seqnum) {
 	unsigned char iv_buffer[TLS_CIPHER_AES_GCM_256_IV_SIZE + TLS_CIPHER_AES_GCM_256_SALT_SIZE];
 
 	if (!client->tls.is_client_traffic_secret_set || !client->tls.is_server_traffic_secret_set) {
-		fprintf(stderr, "%s: traffic secret not set\n", __func__);
+		zlog_error(zlog_tls, "traffic secret not set (fd=%d)", client->fd);
 		return -1;
 	}
 
 	SSL_CTX *ssl_ctx = SSL_get_SSL_CTX(client->tls.ssl);
 	EVP_KDF_CTX *kctx = SSL_CTX_get_app_data(ssl_ctx);
 	if (kctx == NULL) {
-		fprintf(stderr, "%s: kctx is NULL\n", __func__);
+		zlog_error(zlog_tls, "kctx is NULL (fd=%d)", client->fd);
 		EVP_KDF_CTX_free(kctx);
 		return -1;
 	}
@@ -416,19 +414,19 @@ static int tls_make_ktls(struct http_client *client, uint64_t recv_rec_seqnum) {
 	*((__be64 *)crypto_info_send.rec_seq) = __be64_to_cpu(0);
 
 	if (setsockopt(client->fd, SOL_TCP, TCP_ULP, "tls", sizeof("tls")) < 0) {
-		fprintf(stderr, "set ULP tls fail (%s)\n", strerror(errno));
+		zlog_error(zlog_tls, "set ULP tls fail: %s (fd=%d)", strerror(errno), client->fd);
 		return -1;
 	}
 
 	if (setsockopt(client->fd, SOL_TLS, TLS_TX, &crypto_info_send,
 					sizeof(crypto_info_send)) < 0) {
-		fprintf(stderr, "Couldn't set TLS_TX option (%s)\n", strerror(errno));
+		zlog_error(zlog_tls, "Couldn't set TLS_TX option: %s (fd=%d)", strerror(errno), client->fd);
 		return -1;
 	}
 
 	if (setsockopt(client->fd, SOL_TLS, TLS_RX, &crypto_info_recv,
 					sizeof(crypto_info_recv)) < 0) {
-		fprintf(stderr, "Couldn't set TLS_RX option (%s)\n", strerror(errno));
+		zlog_error(zlog_tls, "Couldn't set TLS_RX option: %s (fd=%d)", strerror(errno), client->fd);
 		return -1;
 	}
 
@@ -443,8 +441,7 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 	int ret;
 
 	if (SSL_is_init_finished(client->tls.ssl)) {
-		fprintf(stderr, "%s: conn with handshake done should enter this function"
-			, __func__);
+		zlog_fatal(zlog_tls, "conn with handshake done should enter this function (fd=%d)", client->fd);
 		return -1;
 	}
 
@@ -484,7 +481,7 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 		int bytes_pending = BIO_pending(client->tls.rbio);
 		if (bytes_pending == 0) {
 			if (tls_make_ktls(client, 0) == -1) {
-				fprintf(stderr, "tls_make_ktls failed\n");
+				zlog_error(zlog_tls, "tls_make_ktls failed (fd=%d)", client->fd);
 				return -1;
 			}
 			return 0;
@@ -496,8 +493,7 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 		// scan number of tls record headers from pending bytes
 		int recv_rec_seqnum = count_tls_records(client_data_buffer + bytes_received - bytes_pending, bytes_pending);
 		if (recv_rec_seqnum == -1) {
-			perror("Unable to handle the case tls record arrived "
-				"partically before set ktls");
+			zlog_error(zlog_tls, "Unable to handle the case tls record arrived partically before set ktls (fd=%d)", client->fd);
 		}
 
 		// 1. first data record can come with client finish
@@ -509,14 +505,14 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 		do {
 			ret = SSL_read(client->tls.ssl, client_data_buffer + bytes_decrypted,
 				bytes_received - bytes_decrypted);
-			zlog_debug(zlog_tls, "bytes_decrypted %d ret %d\n", bytes_decrypted, ret);
+			zlog_debug(zlog_tls, "bytes_decrypted %d ret %d (fd=%d)", bytes_decrypted, ret, client->fd);
 			if (ret < 0) {
 				ret = SSL_get_error(client->tls.ssl, ret);
 				if (ret != SSL_ERROR_WANT_READ) {
 					print_ssl_error("SSL_read(client->tls.ssl, client_data_buffer"
 						" + bytes_decrypted, bytes_received - bytes_decrypted) "
 						"returned -1");
-					printf("SSL_get_error %d\n", ret);
+					zlog_error(zlog_tls, "SSL_get_error %d (fd=%d)", ret, client->fd);
 					return -1;
 				} else {
 					ret = 0;
@@ -526,14 +522,13 @@ int tls_handle_handshake(struct http_client *client, const char *client_data_buf
 		} while (ret > 0);
 
 		if (SSL_has_pending(client->tls.ssl)) {
-			print_ssl_error("Unable to handle the case tls record arrived "
-				"partically before set ktls");
+			print_ssl_error("Unable to handle the case tls record arrived partically before set ktls");
 			return -1;
 		}
 
 		// now we are safe to set ktls
 		if (tls_make_ktls(client, (uint64_t) recv_rec_seqnum) == -1) {
-			fprintf(stderr, "tls_make_ktls failed\n");
+			zlog_error(zlog_tls, "tls_make_ktls failed (fd=%d)", client->fd);
 			return -1;
 		}
 
