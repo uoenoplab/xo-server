@@ -164,31 +164,6 @@ static void handoff_out_dequeue(struct handoff_out_queue* queue, void **client) 
 	queue->num_requests--;
 }
 
-static int
-restore_queue(int fd, int q, const uint8_t *buf, uint32_t len, int need_repair)
-{
-	int ret,  max_chunk = len, off = 0;
-
-	if (need_repair) {
-		ret = setsockopt(fd, IPPROTO_TCP, TCP_REPAIR_QUEUE, &q, sizeof(q));
-       		assert(ret == 0);
-	}
-	do {
-		int chunk = len > max_chunk ? max_chunk : len;
-		ret = send(fd, buf + off, chunk, 0);
-		if (ret <= 0) {
-			if (max_chunk > 1024 /* see tcp_export.cpp */) {
-				max_chunk >>= 1;
-				continue;
-			}
-			return errno;
-		}
-		off += ret;
-		len -= ret;
-	} while (len);
-	return 0;
-}
-
 // **special serialize for reset-handoff**
 void handoff_out_serialize_reset(struct http_client *client)
 {
@@ -868,71 +843,170 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	}
 }
 
+static int set_queue_seq(int fd, int queue, uint32_t seq)
+{
+	zlog_debug(zlog_handoff, "setting %d queue seq to %u (rfd=%d)",
+		queue, seq, fd);
+
+	if (setsockopt(fd, SOL_TCP, TCP_REPAIR_QUEUE, &queue, sizeof(queue)) < 0) {
+		fprintf(stderr, "Can't set repair queue");
+		return -1;
+	}
+
+	if (setsockopt(fd, SOL_TCP, TCP_QUEUE_SEQ, &seq, sizeof(seq)) < 0) {
+		fprintf(stderr, "Can't set queue seq");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int __send_queue(int fd, const char *queue, char *buf, uint32_t len)
+{
+	zlog_debug(zlog_handoff, "restoring TCP %s queue data %u bytes (rfd=%d)",
+		queue, len, fd);
+
+	int ret, err = -1, max_chunk;
+	int off;
+
+	max_chunk = len;
+	off = 0;
+
+	do {
+		int chunk = len;
+
+		if (chunk > max_chunk)
+			chunk = max_chunk;
+
+		ret = send(fd, buf + off, chunk, 0);
+		if (ret <= 0) {
+			if (max_chunk > 1024) {
+				/*
+				 * Kernel not only refuses the whole chunk,
+				 * but refuses to split it into pieces too.
+				 *
+				 * When restoring recv queue in repair mode
+				 * kernel doesn't try hard and just allocates
+				 * a linear skb with the size we pass to the
+				 * system call. Thus, if the size is too big
+				 * for slab allocator, the send just fails
+				 * with ENOMEM.
+				 *
+				 * In any case -- try smaller chunk, hopefully
+				 * there's still enough memory in the system.
+				 */
+				max_chunk >>= 1;
+				continue;
+			}
+
+			zlog_fatal(zlog_handoff, "Can't restore %s queue data (%d), want (%d-%d:%d:%d)",
+				queue, ret, off, chunk, len, max_chunk);
+			goto err;
+		}
+		off += ret;
+		len -= ret;
+	} while (len);
+
+	err = 0;
+err:
+	return err;
+}
+
+static int send_queue(int fd, int queue, char *buf, uint32_t len)
+{
+	if (setsockopt(fd, SOL_TCP, TCP_REPAIR_QUEUE, &queue, sizeof(queue)) < 0) {
+		zlog_fatal(zlog_handoff, "Can't set repair queue");
+		return -1;
+	}
+
+	return __send_queue(fd, queue == TCP_RECV_QUEUE ? "recv" : "send", buf, len);
+}
+
+static int restore_queue_recv(int fd, char *buf, int inq_len)
+{
+	if (!inq_len)
+		return 0;
+	return send_queue(fd, TCP_RECV_QUEUE, buf, inq_len);
+}
+
+static int restore_queue_send(int fd, char *buf, int outq_len, int unsq_len)
+{
+	/*
+		* All data in a write buffer can be divided on two parts sent
+		* but not yet acknowledged data and unsent data.
+		* The TCP stack must know which data have been sent, because
+		* acknowledgment can be received for them. These data must be
+		* restored in repair mode.
+		*/
+	uint32_t ulen = unsq_len;
+	uint32_t len = outq_len - ulen;
+
+	if (len && send_queue(fd, TCP_SEND_QUEUE, buf, len))
+		return -2;
+
+	if (ulen) {
+		/*
+			* The second part of data have never been sent to outside, so
+			* they can be restored without any tricks.
+			*/
+		fprintf(stderr, "cannot handle not-send send queue now\n");
+		exit(EXIT_FAILURE);
+		int ret = setsockopt(fd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
+		assert(ret == 0);
+		if (__send_queue(fd, "not-sent send", buf + len, ulen))
+			return -3;
+		ret = setsockopt(fd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
+		assert(ret == 0);
+	}
+
+	return 0;
+}
+
 static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
 {
 	int ret = -1;
 
 	int rfd;
 	struct sockaddr_in server_sin, client_sin;
-	struct tcp_repair_window new_window;
+	struct tcp_repair_opt opts[4];
 
-#ifdef PROFILE
-	struct timespec start_time2, end_time2;
-	clock_gettime(CLOCK_MONOTONIC, &start_time2);
-#endif
+	struct tls12_crypto_info_aes_gcm_256 *crypto_info_send;
+	struct tls12_crypto_info_aes_gcm_256 *crypto_info_recv;
 
 	/* restore tcp connection */
 	rfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	assert(rfd > 0);
+
 	ret = setsockopt(rfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
 	assert(ret == 0);
 	ret = setsockopt(rfd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int));
 	assert(ret == 0);
-	ioctl(rfd, FIONBIO, &(int){1});
+
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
 	assert(ret == 0);
-	const int qid_snd = TCP_SEND_QUEUE;
-	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_QUEUE, &qid_snd, sizeof(qid_snd));
-	assert(ret == 0);
-	ret = setsockopt(rfd, IPPROTO_TCP, TCP_QUEUE_SEQ, &migration_info->seq, sizeof(migration_info->seq));
-	assert(ret == 0);
-	const int qid_rcv = TCP_RECV_QUEUE;
-	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_QUEUE, &qid_rcv, sizeof(qid_rcv));
-	assert(ret == 0);
-	ret = setsockopt(rfd, IPPROTO_TCP, TCP_QUEUE_SEQ, &migration_info->ack, sizeof(migration_info->ack));
-	assert(ret == 0);
+
+	set_socket_non_blocking(rfd);
 
 	server_sin.sin_family = AF_INET;
 	server_sin.sin_port = migration_info->self_port;
 	server_sin.sin_addr.s_addr = get_my_osd_addr().sin_addr.s_addr;
+	ret = bind(rfd, (struct sockaddr *)&server_sin, sizeof(server_sin));
+	assert(ret == 0);
+
+	ret = set_queue_seq(rfd, TCP_RECV_QUEUE, migration_info->ack - migration_info->recvq.len);
+	assert(ret == 0);
+
+	ret = set_queue_seq(rfd, TCP_SEND_QUEUE,  migration_info->seq - migration_info->sendq.len);
+	assert(ret == 0);
+
 	client_sin.sin_family = AF_INET;
 	client_sin.sin_port = migration_info->peer_port;
 	client_sin.sin_addr.s_addr = migration_info->peer_addr;
-
-	ret = bind(rfd, (struct sockaddr *)&server_sin, sizeof(server_sin));
+	ret = connect(rfd, (struct sockaddr *)&client_sin, sizeof(client_sin));
 	assert(ret == 0);
-	socklen_t new_ulen = migration_info->unsentq_len;
-	socklen_t new_len = migration_info->sendq.len - new_ulen;
 
-	zlog_debug(zlog_handoff, "restore send q: new_ulen %d new_len %d recvq len %d (rfd=%d)", new_ulen, new_len, migration_info->recvq.len, rfd);
-	if (new_len) {
-		ret = restore_queue(rfd, TCP_SEND_QUEUE, (const uint8_t *)migration_info->sendq.data, new_len, 1);
-		assert(ret == 0);
-	}
-	if (new_ulen) {
-		//ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(-1));
-		//assert(ret == 0);
-		ret = restore_queue(rfd, TCP_SEND_QUEUE, (const uint8_t *)migration_info->sendq.data + new_len, new_ulen, 0);
-		assert(ret == 0);
-		//ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
-		//assert(ret == 0);
-	}
-	if (migration_info->recvq.len > 0) {
-		ret = restore_queue(rfd, TCP_RECV_QUEUE, (const uint8_t *)migration_info->recvq.data, migration_info->recvq.len, 1);
-		assert(ret == 0);
-	}
+	zlog_debug(zlog_handoff, "restoring TCP options");
 
-	struct tcp_repair_opt opts[4];
 	bzero(opts, sizeof(opts));
 	opts[0].opt_code = TCPOPT_SACK_PERM;
 	opts[0].opt_val = 0;
@@ -948,16 +1022,21 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_TIMESTAMP, &migration_info->timestamp, sizeof(migration_info->timestamp));
 	assert(ret == 0);
 
-	new_window.snd_wl1 = migration_info->snd_wl1;
-	new_window.snd_wnd = migration_info->snd_wnd;
-	new_window.max_window = migration_info->max_window;
-	new_window.rcv_wnd = migration_info->rev_wnd;
-	new_window.rcv_wup = migration_info->rev_wup;
-
-	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &new_window, sizeof(new_window));
+	ret = restore_queue_recv(rfd, (const uint8_t *)migration_info->recvq.data,
+		migration_info->recvq.len);
+	assert(ret == 0);
+	ret = restore_queue_send(rfd, (const uint8_t *)migration_info->sendq.data,
+		migration_info->sendq.len, migration_info->unsentq_len);
 	assert(ret == 0);
 
-	ret = connect(rfd, (struct sockaddr *)&client_sin, sizeof(client_sin));
+	struct tcp_repair_window wopt = {
+		.snd_wl1 = migration_info->snd_wl1,
+		.snd_wnd = migration_info->snd_wnd,
+		.max_window = migration_info->max_window,
+		.rcv_wnd = migration_info->rev_wnd,
+		.rcv_wup = migration_info->rev_wup,
+	};
+	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &wopt, sizeof(wopt));
 	assert(ret == 0);
 
 	if (migration_info->ktlsbuf.len != 0) {
@@ -965,15 +1044,12 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 			zlog_fatal(zlog_tls, "incorrect ktlsbuf length (%ld)", migration_info->ktlsbuf.len);
 			exit(EXIT_FAILURE);
 		}
-		struct tls12_crypto_info_aes_gcm_256 *crypto_info_send =
-			migration_info->ktlsbuf.data;
-		struct tls12_crypto_info_aes_gcm_256 *crypto_info_recv =
-			migration_info->ktlsbuf.data + sizeof(struct tls12_crypto_info_aes_gcm_256);
+		crypto_info_send = migration_info->ktlsbuf.data;
+		crypto_info_recv = migration_info->ktlsbuf.data + sizeof(struct tls12_crypto_info_aes_gcm_256);
 		if (setsockopt(rfd, SOL_TCP, TCP_ULP, "tls", sizeof("tls")) < 0) {
 			zlog_fatal(zlog_tls, "set ULP tls fail (%s)", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
-
 		if (setsockopt(rfd, SOL_TLS, TLS_TX, crypto_info_send,
 						sizeof(*crypto_info_send)) < 0) {
 			zlog_fatal(zlog_tls, "Couldn't set TLS_TX option (%s)", strerror(errno));
@@ -985,6 +1061,10 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 			exit(EXIT_FAILURE);
 		}
 	}
+
+	/* quiting repair mode */
+	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
+	assert(ret == 0);
 
 	struct http_client *client = create_http_client(in_ctx->epoll_fd, rfd);
 	snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, "%s", migration_info->bucket_name);
@@ -1010,10 +1090,6 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 
 	client->client_addr = migration_info->peer_addr;
 	client->client_port = migration_info->peer_port;
-
-	/* quiting repair mode */
-	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
-	assert(ret == 0);
 
 	client->fd = rfd;
 
@@ -1176,7 +1252,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 			zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Migration target is current node, deserialize (in_ctx->fd=%d)", in_ctx->fd);
 			handoff_in_deserialize(in_ctx, migration_info);
 		} else {
-			zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Migration target is not current node, rehandoff to target (osd=%d,in_ctx->fd=%d)", 
+			zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Migration target is not current node, rehandoff to target (osd=%d,in_ctx->fd=%d)",
 				migration_info->acting_primary_osd_id, in_ctx->fd);
 
 			handoff_out_serialize_rehandoff(&in_ctx->client_to_handoff_again, migration_info);
