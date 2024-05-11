@@ -27,7 +27,6 @@
 
 #include "handoff.h"
 
-#define S3_HTTP_PORT 8080
 #define MAX_EVENTS 1000
 
 enum THREAD_EPOLL_EVENT {
@@ -171,7 +170,7 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 {
 	pid_t tid = gettid();
 
-	int new_socket;
+	int new_socket, ret;
 	struct sockaddr_in client_addr;
 	socklen_t client_len = sizeof(client_addr);
 
@@ -181,6 +180,9 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
         	zlog_error(zlog_server, "Fail to accept new client connection: %s", strerror(errno));
 		return;
 	}
+
+	//ret = setsockopt(new_socket, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int));
+	//assert(ret == 0);
 
 	char *ip_addr_str = inet_ntoa(client_addr.sin_addr);
 
@@ -194,7 +196,7 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	client->epoll_data_u32 = S3_HTTP_EVENT;
 
 	// TODO: optimize
-	int ret = get_mac_address(ifname, client_addr, client->client_mac);
+	ret = get_mac_address(ifname, client_addr, client->client_mac);
 	assert(ret == 0);
 
 	//printf("MAC addr of remote ip %s is ", ip_addr_str);
@@ -327,7 +329,8 @@ int handle_client_data(int epoll_fd, struct http_client *client,
 		bytes_received = handle_client_data_ssl(client, ssl_ctx, client_data_buffer, bytes_received);
 		if (bytes_received == -1) {
 			zlog_fatal(zlog_server, "handle_client_data_ssl returned %ld", bytes_received);
-			exit(EXIT_FAILURE);
+			//exit(EXIT_FAILURE);
+			return -1;
 		}
 		if (bytes_received == 0) return 0;
 	}
@@ -799,6 +802,13 @@ int main(int argc, char *argv[])
 		zlog_fini();
 		return -2;
 	}
+//	struct handoff_in in_ctx;
+//	FILE *f = fopen("sock_ulp.proto", "rb");
+//	in_ctx.recv_protobuf = malloc(237);
+//	fread(in_ctx.recv_protobuf, 237, 1, f);
+//	fclose(f);
+//	SocketSerialize *migration_info = socket_serialize__unpack(NULL, 237, in_ctx.recv_protobuf);
+//	handoff_in_deserialize(&in_ctx, migration_info);
 
 	signal(SIGPIPE, SIG_IGN);
 

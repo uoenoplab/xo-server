@@ -24,6 +24,8 @@
 
 #define HANDOFF_CTRL_PORT 9000
 
+#define S3_HTTP_PORT 8080
+
 #include "zlog.h"
 
 extern zlog_category_t *zlog_handoff;
@@ -99,5 +101,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send,
 void handoff_in_send(struct handoff_in *in_ctx);
 
 void handoff_in_disconnect(struct handoff_in *in_ctx);
+//#include "proto/socket_serialize.pb-c.h"
+//void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info);
 
 #endif

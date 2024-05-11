@@ -220,11 +220,11 @@ static void handoff_out_serialize_rehandoff(struct http_client **client_to_hando
 
 	// apply blocking
 	ret = apply_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-			migration_info->peer_port, migration_info->self_port,
+			migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
 			migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac, get_my_osd_addr().sin_addr.s_addr, my_mac,
 			migration_info->peer_port, migration_info->self_port, true);
 	assert(ret == 0);
-	zlog_debug(zlog_handoff, "Applied blocking with eBPF (%d,%d) (fd=%d)", ntohs(migration_info->peer_port), ntohs(migration_info->self_port), 0);
+	zlog_debug(zlog_handoff, "Applied blocking with eBPF (%d,%d) (fd=%d)", ntohs(migration_info->peer_port), ntohs(migration_info->self_port) - get_my_osd_id() - 1, 0);
 
 	// we set fd as 0 so it will not considered as reset handoff
 	struct http_client *client = create_http_client(-1, 0);
@@ -279,7 +279,7 @@ void handoff_out_serialize(struct http_client *client)
 	slen = sizeof(info);
 	ret = getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &slen);
 	assert(ret == 0);
-	ret = info.tcpi_state == TCP_ESTABLISHED || info.tcpi_state == TCP_CLOSE_WAIT;
+	ret = info.tcpi_state == TCP_ESTABLISHED;
 	assert(ret == 0);
 
 	int sendq_len, unsentq_len, recvq_len;
@@ -385,7 +385,13 @@ void handoff_out_serialize(struct http_client *client)
 	migration_info.rev_wnd = window.rcv_wnd;
 	migration_info.rev_wup = window.rcv_wup;
 	migration_info.self_addr = self_sin.sin_addr.s_addr;
-	migration_info.self_port = self_sin.sin_port;
+	if (client->from_migrate != -1) {
+		migration_info.self_port = self_sin.sin_port;
+		zlog_debug(zlog_handoff, "I am fake server, this is a hand off back request, do not increment self port: %d", ntohs(migration_info.self_port ));
+	}
+	else {
+		migration_info.self_port = htons(ntohs(self_sin.sin_port) + get_my_osd_id() + 1);
+	}
 	migration_info.peer_addr = client->client_addr;
 	memcpy(&(migration_info.peer_mac), client->client_mac, sizeof(uint8_t) * 6);
 	migration_info.peer_port = client->client_port;
@@ -771,12 +777,12 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		// insert redirection rule: peer mac is fake server mac
 #ifdef USE_TC
 		ret = apply_redirection(migration_info->peer_addr, migration_info->self_addr,
-					migration_info->peer_port, migration_info->self_port,
+					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
 					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
 					migration_info->peer_port, migration_info->self_port, false, true);
 #else
 		ret = apply_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
-					migration_info->peer_port, migration_info->self_port,
+					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
 					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
 					migration_info->peer_port, migration_info->self_port, false);
 #endif
@@ -785,8 +791,20 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		zlog_debug(zlog_handoff, "HANDOFF_OUT Apply redirection rule (osd=%d,out_ctx->fd=%d,fd=%d) client(%" PRIu64 ":%d) server(%" PRIu64 ":%d) to fake server(%u:%d)",
 				out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd,
 				migration_info->peer_addr, ntohs(migration_info->peer_port),
-				migration_info->self_addr, ntohs(migration_info->self_port),
+				migration_info->self_addr, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
 				osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, ntohs(migration_info->self_port));
+
+		// remove blocking
+		zlog_debug(zlog_handoff, "HANDOFF_OUT To remove blocking rule after apply redirection (osd=%d,client=%" PRIu64 ":%d,original_server=%" PRIu64 ":%d,out_ctx->fd=%d,fd=%d)",
+			out_ctx->client->to_migrate,
+			migration_info->peer_addr, ntohs(migration_info->peer_port),
+			migration_info->self_addr, ntohs(migration_info->self_port) - get_my_osd_id() - 1,
+			out_ctx->fd, out_ctx->client->fd);
+#ifdef USE_TC
+		ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+		assert(ret == 0);
+#endif
 	} else {
 		// handoff back and handoff reset
 		// remove src IP modification
@@ -795,24 +813,25 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port);
 		assert(ret == 0);
-		zlog_debug(zlog_handoff, "Remove src ip modification client(%" PRIu64 ":%d) self(%" PRIu64 ":%d)",
+		zlog_debug(zlog_handoff, "Removed src ip modification client(%" PRIu64 ":%d) self(%" PRIu64 ":%d)",
 					migration_info->peer_addr, ntohs(migration_info->peer_port),
 					migration_info->self_addr, ntohs(migration_info->self_port));
+
+		zlog_debug(zlog_handoff, "HANDOFF_OUT To remove blocking rule after removing src IP modification rule (osd=%d,client=%" PRIu64 ":%d,original_server=%" PRIu64 ":%d,out_ctx->fd=%d,fd=%d)",
+			out_ctx->client->to_migrate,
+			migration_info->peer_addr, ntohs(migration_info->peer_port),
+			migration_info->self_addr, ntohs(migration_info->self_port),
+			out_ctx->fd, out_ctx->client->fd);
+#ifdef USE_TC
+		ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+					migration_info->peer_port, migration_info->self_port);
+		assert(ret == 0);
+#endif
 	}
 
 	// we don't need this for handoff_reset where fd already closed
 	// if (out_ctx->client->fd >= 0) {
 	// remove blocking
-#ifdef USE_TC
-	ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
-				migration_info->peer_port, migration_info->self_port);
-	assert(ret == 0);
-	zlog_debug(zlog_handoff, "HANDOFF_OUT Removed blocking rule (osd=%d,client=%" PRIu64 ":%d,original_server=%" PRIu64 ":%d,out_ctx->fd=%d,fd=%d)",
-		out_ctx->client->to_migrate,
-		migration_info->peer_addr, ntohs(migration_info->peer_port),
-		migration_info->self_addr, ntohs(migration_info->self_port),
-		out_ctx->fd, out_ctx->client->fd);
-#endif
 	// }
 
 	handoff_out_send_done(out_ctx);
@@ -962,7 +981,8 @@ static int restore_queue_send(int fd, char *buf, int outq_len, int unsq_len)
 	return 0;
 }
 
-static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
+//static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
+void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
 {
 	int ret = -1;
 
@@ -972,40 +992,50 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 
 	struct tls12_crypto_info_aes_gcm_256 *crypto_info_send;
 	struct tls12_crypto_info_aes_gcm_256 *crypto_info_recv;
-
+	size_t retry = 0;
+retry:
 	/* restore tcp connection */
+	errno = 0;
+
 	rfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	assert(rfd > 0);
-
-	ret = setsockopt(rfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
-	assert(ret == 0);
-	ret = setsockopt(rfd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int));
-	assert(ret == 0);
-
+	assert(errno == 0);
+	
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){1}, sizeof(int));
 	assert(ret == 0);
+	assert(errno == 0);
 
-	set_socket_non_blocking(rfd);
+	//ret = setsockopt(rfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
+	//assert(ret == 0);
+	//assert(errno == 0);
+	//ret = setsockopt(rfd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int));
+	//assert(ret == 0);
+	//assert(errno == 0);
 
 	server_sin.sin_family = AF_INET;
-	server_sin.sin_port = migration_info->self_port;
+	if (migration_info->msg_type == HANDOFF_BACK_REQUEST || migration_info->msg_type == HANDOFF_RESET_REQUEST)
+		server_sin.sin_port = htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1);
+	else
+		server_sin.sin_port = migration_info->self_port;
 	server_sin.sin_addr.s_addr = get_my_osd_addr().sin_addr.s_addr;
 	ret = bind(rfd, (struct sockaddr *)&server_sin, sizeof(server_sin));
 	assert(ret == 0);
+	assert(errno == 0);
 
 	ret = set_queue_seq(rfd, TCP_RECV_QUEUE, migration_info->ack - migration_info->recvq.len);
 	assert(ret == 0);
+	assert(errno == 0);
 
 	ret = set_queue_seq(rfd, TCP_SEND_QUEUE,  migration_info->seq - migration_info->sendq.len);
 	assert(ret == 0);
+	assert(errno == 0);
 
 	client_sin.sin_family = AF_INET;
 	client_sin.sin_port = migration_info->peer_port;
 	client_sin.sin_addr.s_addr = migration_info->peer_addr;
 	ret = connect(rfd, (struct sockaddr *)&client_sin, sizeof(client_sin));
 	assert(ret == 0);
-
-	zlog_debug(zlog_handoff, "restoring TCP options");
+	assert(errno == 0);
 
 	bzero(opts, sizeof(opts));
 	opts[0].opt_code = TCPOPT_SACK_PERM;
@@ -1019,15 +1049,19 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_OPTIONS, opts, sizeof(struct tcp_repair_opt) * 4);
 	assert(ret == 0);
+	assert(errno == 0);
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_TIMESTAMP, &migration_info->timestamp, sizeof(migration_info->timestamp));
 	assert(ret == 0);
+	assert(errno == 0);
 
 	ret = restore_queue_recv(rfd, (const uint8_t *)migration_info->recvq.data,
 		migration_info->recvq.len);
 	assert(ret == 0);
+	assert(errno == 0);
 	ret = restore_queue_send(rfd, (const uint8_t *)migration_info->sendq.data,
 		migration_info->sendq.len, migration_info->unsentq_len);
 	assert(ret == 0);
+	assert(errno == 0);
 
 	struct tcp_repair_window wopt = {
 		.snd_wl1 = migration_info->snd_wl1,
@@ -1038,6 +1072,31 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 	};
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR_WINDOW, &wopt, sizeof(wopt));
 	assert(ret == 0);
+	assert(errno == 0);
+
+	const struct linger nolinger = { .l_onoff = 1, .l_linger = 0 };
+	ret = setsockopt(rfd, SOL_SOCKET, SO_LINGER, &nolinger, sizeof nolinger);
+	assert(ret == 0);
+
+	//int error = 0;
+	//socklen_t len = sizeof (error);
+	//ret = getsockopt(rfd, SOL_SOCKET, SO_ERROR, &error, &len);
+	//if (ret != 0) {
+	//	/* there was a problem getting the error code */
+	//	zlog_error(zlog_handoff, "Error getting socket error code: %s\n", strerror(ret));
+	//	return;
+	//}
+	
+	///* socket has a non zero error status */
+	//zlog_notice(zlog_handoff, "Repaired socket state: %s\n", strerror(error));
+
+	struct tcp_info_sub info;
+	socklen_t slen = sizeof(info);
+	ret = getsockopt(rfd, IPPROTO_TCP, TCP_INFO, &info, &slen);
+	assert(ret == 0);
+	if (info.tcpi_state != TCP_ESTABLISHED) {
+		zlog_notice(zlog_handoff, "TCP repair mode socket not established");
+	}
 
 	if (migration_info->ktlsbuf.len != 0) {
 		if (migration_info->ktlsbuf.len != 2 * sizeof(struct tls12_crypto_info_aes_gcm_256)) {
@@ -1046,8 +1105,49 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 		}
 		crypto_info_send = migration_info->ktlsbuf.data;
 		crypto_info_recv = migration_info->ktlsbuf.data + sizeof(struct tls12_crypto_info_aes_gcm_256);
+		
+		//struct tcp_info_sub info;
+		//socklen_t slen = sizeof(info);
+		//ret = getsockopt(rfd, IPPROTO_TCP, TCP_INFO, &info, &slen);
+		//assert(ret == 0);
+		//if (info.tcpi_state != TCP_ESTABLISHED) {
+		//	zlog_fatal(zlog_tls, "tcp state not established");
+		//	int peer_port = ntohs(migration_info->peer_port);
+		//	char cmd[1024];
+		//	zlog_debug(zlog_handoff, "\n\n\n address: %d:%d netstat before close\n\n\n", migration_info->peer_addr, peer_port);
+		//	sprintf(cmd, "netstat -tnp | grep %d", peer_port);
+		//	if (retry == 4)	system(cmd);
+		//	//fflush(stdout);
+		//	close(rfd);
+		//	zlog_debug(zlog_handoff, "\n\n\n address: %d:%d netstat after close\n\n\n", migration_info->peer_addr, peer_port);
+		//	sprintf(cmd, "netstat -tnp | grep %d", peer_port);
+		//	if (retry == 4)	system(cmd);
+		//	//fflush(stdout);
+		//	retry++;
+		//	if (retry > 5) {
+		//		zlog_fatal(zlog_handoff, "retry ulp reached to max\n");
+		//		exit(1);
+		//	}
+		//	goto retry;
+		//}
+		//if (retry)
+		//	zlog_debug(zlog_tls, "tcp state established success after retry=%d", retry);
+
 		if (setsockopt(rfd, SOL_TCP, TCP_ULP, "tls", sizeof("tls")) < 0) {
-			zlog_fatal(zlog_tls, "set ULP tls fail (%s)", strerror(errno));
+			if (info.tcpi_state != TCP_ESTABLISHED) {
+				zlog_fatal(zlog_tls, "set ULP tls fail (%s). it was previously not TCP_ESTABLISHED (peer_port=%d)", strerror(errno), ntohs(migration_info->peer_port));
+			}
+			else {
+				zlog_fatal(zlog_tls, "set ULP tls fail (%s). it was previously TCP_ESTABLISHED (peer_port=%d)", strerror(errno), ntohs(migration_info->peer_port));
+			}
+			fflush(stdout);
+			sleep(1);
+			//int proto_len = socket_serialize__get_packed_size(migration_info);
+			//uint8_t *proto_buf = malloc(proto_len);
+			//socket_serialize__pack(migration_info, proto_buf);
+			//FILE *f = fopen("sock.proto", "wb");
+			//fwrite(proto_buf, proto_len, 1, f);
+			//fclose(f);
 			exit(EXIT_FAILURE);
 		}
 		if (setsockopt(rfd, SOL_TLS, TLS_TX, crypto_info_send,
@@ -1060,11 +1160,18 @@ static void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *m
 			zlog_fatal(zlog_tls, "Couldn't set TLS_RX option (%s)", strerror(errno));
 			exit(EXIT_FAILURE);
 		}
+		zlog_debug(zlog_handoff, "Added kTLS state to socket");
 	}
 
 	/* quiting repair mode */
 	ret = setsockopt(rfd, IPPROTO_TCP, TCP_REPAIR, &(int){-1}, sizeof(int));
 	assert(ret == 0);
+
+	// make sure repair is blocking
+	set_socket_non_blocking(rfd);
+
+	//ret = setsockopt(rfd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int));
+	//assert(ret == 0);
 
 	struct http_client *client = create_http_client(in_ctx->epoll_fd, rfd);
 	snprintf(client->bucket_name, MAX_BUCKET_NAME_SIZE, "%s", migration_info->bucket_name);
@@ -1244,7 +1351,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 		ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port,
 					migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
-					migration_info->self_port, migration_info->peer_port, false, false);
+					htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false, false); // offst self port
 		assert(ret == 0);
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Applied source IP modification (in_ctx->fd=%d)", in_ctx->fd);
 	} else if (migration_info->msg_type == HANDOFF_BACK_REQUEST) {
@@ -1259,32 +1366,31 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 		}
 		// we are safe to remove previous redir to fake server there since we
 		// either have a working fd or blocked incoming packets
-#ifdef USE_TC
-		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-					migration_info->peer_port, migration_info->self_port);
-#else
-		ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-					migration_info->peer_port, migration_info->self_port);
-#endif
-		assert(ret == 0);
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Remove redirection rule from client to fake server (osd=%d,client=%" PRIu64":%d,original_server=%" PRIu64":%d)",
 					osd_ids[in_ctx->osd_arr_index],
 					migration_info->peer_addr, ntohs(migration_info->peer_port),
-					migration_info->self_addr, ntohs(migration_info->self_port));
-
+					migration_info->self_addr, ntohs(migration_info->self_port) - get_my_osd_id() - 1);
+#ifdef USE_TC
+		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+#else
+		ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+#endif
+		assert(ret == 0);
 	} else if (migration_info->msg_type == HANDOFF_RESET_REQUEST) {
 #ifdef USE_TC
 		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-					migration_info->peer_port, migration_info->self_port);
+					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
 #else
 		ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-					migration_info->peer_port, migration_info->self_port);
+					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
 #endif
 		assert(ret == 0);
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_RESET_REQUEST Remove redirection rule from client to fake server (osd=%d,client=%" PRIu64":%d,orignal_server=%" PRIu64":%d)",
 				osd_ids[in_ctx->osd_arr_index],
 				migration_info->peer_addr, ntohs(migration_info->peer_port),
-				migration_info->self_addr, ntohs(migration_info->self_port));
+				migration_info->self_addr, ntohs(migration_info->self_port) - get_my_osd_id() - 1);
 	} else {
 		zlog_fatal(zlog_handoff, "Can only handle HANDOFF_REQUEST or HANDOFF_BACK_REQUEST msg");
 		exit(EXIT_FAILURE);
