@@ -21,7 +21,7 @@
 
 #include "proto/socket_serialize.pb-c.h"
 
-#define USE_TC
+//#define USE_TC
 
 zlog_category_t *zlog_handoff;
 
@@ -822,11 +822,11 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 			migration_info->peer_addr, ntohs(migration_info->peer_port),
 			migration_info->self_addr, ntohs(migration_info->self_port),
 			out_ctx->fd, out_ctx->client->fd);
-#ifdef USE_TC
+//#ifdef USE_TC
 		ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
 					migration_info->peer_port, migration_info->self_port);
 		assert(ret == 0);
-#endif
+//#endif
 	}
 
 	// we don't need this for handoff_reset where fd already closed
