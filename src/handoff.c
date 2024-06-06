@@ -21,7 +21,8 @@
 
 #include "proto/socket_serialize.pb-c.h"
 
-//#define USE_TC
+#define USE_TC
+#define TC_OFFLOAD true
 
 zlog_category_t *zlog_handoff;
 
@@ -591,12 +592,12 @@ static void do_handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct h
 
 	if (urgent) {
 		handoff_out_enqueue_front(out_ctx->queue, client);
-		zlog_debug(zlog_handoff, "HANDOFF_OUT (front)enqueued (backlog=%d) Migration (OSD=%d,fd=%d)",
-			out_ctx->queue->num_requests, osd_ids[out_ctx->osd_arr_index], client->fd);
+		zlog_debug(zlog_handoff, "HANDOFF_OUT (front)enqueued (backlog=%d) Migration (OSD=%d,fd=%d,port=%d)",
+			out_ctx->queue->num_requests, osd_ids[out_ctx->osd_arr_index], client->fd, ntohs(client->client_port));
 	} else {
 		handoff_out_enqueue(out_ctx->queue, client);
-		zlog_debug(zlog_handoff, "HANDOFF_OUT enqueued (backlog=%d) Migration (OSD=%d,fd=%d)",
-			out_ctx->queue->num_requests, osd_ids[out_ctx->osd_arr_index], client->fd);
+		zlog_debug(zlog_handoff, "HANDOFF_OUT enqueued (backlog=%d) Migration (OSD=%d,fd=%d,port=%d)",
+			out_ctx->queue->num_requests, osd_ids[out_ctx->osd_arr_index], client->fd, ntohs(client->client_port));
 	}
 
 	if (out_ctx->client) {
@@ -619,7 +620,7 @@ static void do_handoff_out_issue(int epoll_fd, uint32_t epoll_data_u32, struct h
 	event.data.ptr = out_ctx;
 	event.events = EPOLLOUT;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, out_ctx->fd, &event) == -1) {
-		zlog_fatal(zlog_handoff, "HANDOFF_OUT Failed to add control conn to epoll (out_ctx->fd=%d,fd=%d,osd=%d): %s", out_ctx->fd, client->fd, osd_ids[out_ctx->osd_arr_index], strerror(errno));
+		zlog_fatal(zlog_handoff, "HANDOFF_OUT Failed to add control conn to epoll (out_ctx->fd=%d,fd=%d,osd=%d,port=%d): %s", out_ctx->fd, client->fd, osd_ids[out_ctx->osd_arr_index], ntohs(client->client_port), strerror(errno));
 		close(out_ctx->fd);
 		exit(EXIT_FAILURE);
 	}
@@ -680,7 +681,7 @@ void handoff_out_send(struct handoff_out *out_ctx)
 
 	// send done
 	if (out_ctx->client->proto_buf_len == out_ctx->client->proto_buf_sent) {
-		zlog_debug(zlog_handoff, "HANDOFF_OUT migration request sent (OSD=%d,fd=%d)", out_ctx->client->to_migrate, out_ctx->client->fd);
+		zlog_debug(zlog_handoff, "HANDOFF_OUT migration request sent (OSD=%d,fd=%d,port=%d)", out_ctx->client->to_migrate, out_ctx->client->fd, ntohs(out_ctx->client->client_port));
 
 		if (out_ctx->client->proto_buf != NULL) {
 			free(out_ctx->client->proto_buf);
@@ -701,7 +702,7 @@ void handoff_out_send(struct handoff_out *out_ctx)
 
 static void handoff_out_send_done(struct handoff_out *out_ctx)
 {
-	zlog_debug(zlog_handoff, "HANDOFF_OUT send done (osd=%d,out_ctx->fd=%d,fd=%d)", osd_ids[out_ctx->osd_arr_index], out_ctx->fd, out_ctx->client->fd);
+	zlog_debug(zlog_handoff, "HANDOFF_OUT send done (osd=%d,out_ctx->fd=%d,fd=%d,port=%d)", osd_ids[out_ctx->osd_arr_index], out_ctx->fd, out_ctx->client->fd, ntohs(out_ctx->client->client_port));
 
 	uint32_t magic_number = UINT32_MAX;
 	int ret = send(out_ctx->fd, &magic_number,
@@ -751,7 +752,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	if (out_ctx->recv_protobuf_received < out_ctx->recv_protobuf_len)
 		return;
 
-	zlog_debug(zlog_handoff, "HANDOFF_OUT Received response for migration request (osd=%d,out_ctx->fd=%d,fd=%d)", out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd);
+	zlog_debug(zlog_handoff, "HANDOFF_OUT Received response for migration request (osd=%d,out_ctx->fd=%d,fd=%d,port=%d)", out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd, ntohs(out_ctx->client->client_port));
 
 	SocketSerialize *migration_info = socket_serialize__unpack(NULL,
 		out_ctx->recv_protobuf_len, out_ctx->recv_protobuf);
@@ -779,14 +780,15 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		ret = apply_redirection(migration_info->peer_addr, migration_info->self_addr,
 					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
 					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
-					migration_info->peer_port, migration_info->self_port, false, true);
+					migration_info->peer_port, migration_info->self_port, false, TC_OFFLOAD);
+		assert(ret == 0);
 #else
 		ret = apply_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
 					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
 					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
 					migration_info->peer_port, migration_info->self_port, false);
-#endif
 		assert(ret == 0);
+#endif
 
 		zlog_debug(zlog_handoff, "HANDOFF_OUT Apply redirection rule (osd=%d,out_ctx->fd=%d,fd=%d) client(%" PRIu64 ":%d) server(%" PRIu64 ":%d) to fake server(%u:%d)",
 				out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd,
@@ -800,6 +802,8 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 			migration_info->peer_addr, ntohs(migration_info->peer_port),
 			migration_info->self_addr, ntohs(migration_info->self_port) - get_my_osd_id() - 1,
 			out_ctx->fd, out_ctx->client->fd);
+// we need to remove redirection if only TC is used.
+// redirection should not be removed when eBPF is used as blocking will be updated to forwarding
 #ifdef USE_TC
 		ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
 					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
@@ -808,8 +812,8 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	} else {
 		// handoff back and handoff reset
 		// remove src IP modification
-		zlog_debug(zlog_handoff, "HANDOFF_OUT Handing connection back to original server or conn reset (osd=%d,conn=%d)",
-					out_ctx->client->to_migrate, out_ctx->client->fd);
+		zlog_debug(zlog_handoff, "HANDOFF_OUT Handing connection back to original server or conn reset (osd=%d,conn=%d,port=%d)",
+					out_ctx->client->to_migrate, out_ctx->client->fd, ntohs(out_ctx->client->client_port));
 		ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port);
 		assert(ret == 0);
@@ -822,11 +826,9 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 			migration_info->peer_addr, ntohs(migration_info->peer_port),
 			migration_info->self_addr, ntohs(migration_info->self_port),
 			out_ctx->fd, out_ctx->client->fd);
-//#ifdef USE_TC
 		ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
 					migration_info->peer_port, migration_info->self_port);
 		assert(ret == 0);
-//#endif
 	}
 
 	// we don't need this for handoff_reset where fd already closed
@@ -1373,20 +1375,22 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 #ifdef USE_TC
 		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+		assert(ret == 0);
 #else
 		ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
-#endif
 		assert(ret == 0);
+#endif
 	} else if (migration_info->msg_type == HANDOFF_RESET_REQUEST) {
 #ifdef USE_TC
 		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+		assert(ret == 0);
 #else
 		ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
-#endif
 		assert(ret == 0);
+#endif
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_RESET_REQUEST Remove redirection rule from client to fake server (osd=%d,client=%" PRIu64":%d,orignal_server=%" PRIu64":%d)",
 				osd_ids[in_ctx->osd_arr_index],
 				migration_info->peer_addr, ntohs(migration_info->peer_port),

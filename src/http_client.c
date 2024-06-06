@@ -29,6 +29,7 @@ int send_client_data(struct http_client *client)
 		iov_count++;
 	}
 
+	//zlog_debug(zlog_object_store, "to writev");
 	ssize_t ret = writev(client->fd, iov, iov_count);
 	if (ret > 0) {
 		// response is not complete sent
@@ -45,10 +46,10 @@ int send_client_data(struct http_client *client)
 		}
 
 		client->data_payload_sent += ret;
-		// printf("writev fd=%d called %ld/%ld %ld/%ld\n", client->fd, client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
+		zlog_debug(zlog_object_store, "writev (fd=%d,port=%d) called %ld/%ld %ld/%ld", client->fd, ntohs(client->client_port), client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
 	} else {
 		if (ret == 0 || (ret == -1 && errno != EAGAIN)) {
-			fprintf(stderr, "writev returned %d on fd %d (%s)\n", ret, client->fd, strerror(errno));
+			zlog_error(zlog_object_store, "writev returned %d on (fd=%d,port=%d) (%s)\n", ret, client->fd, ntohs(client->client_port), strerror(errno));
 			return -1;
 		}
 	}
