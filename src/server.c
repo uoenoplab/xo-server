@@ -494,7 +494,7 @@ static void *conn_wait(void *arg)
 						   (events[i].events & EPOLLRDHUP)) {
 					zlog_error(zlog_server, "S3_HTTP error event (fd=%d,events=%d,object_name=%s,port=%d)", c->fd, events[i].events, c->object_name, ntohs(c->client_port));
 					fflush(stdout);
-					exit(1);
+					//exit(1);
 					handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
 				} else if (events[i].events & EPOLLOUT) {
 					ret = send_client_data(c);
@@ -635,7 +635,7 @@ static void *conn_wait(void *arg)
 						handoff_out_reconnect(out_ctx);
 					}
 				} else if (events[i].events & EPOLLIN) {
-					zlog_debug(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_recv (out_ctx->fd=%d,fd=%d", out_ctx->fd, out_ctx->client->fd);
+					zlog_debug(zlog_handoff, "HANDOFF_OUT_EVENT handoff_out_recv (out_ctx->fd=%d,fd=%d)", out_ctx->fd, out_ctx->client->fd);
 					// handle handoff response, if all received, then swtich back to epollout
 					handoff_out_recv(out_ctx);
 				}

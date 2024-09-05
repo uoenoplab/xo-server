@@ -468,7 +468,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 
 		rados_read_op_t read_op = rados_create_read_op();
 		rados_read_op_assert_exists(read_op);
-		rados_read_op_omap_get_vals2(read_op, prefix, continue_from, 5000, &iter, &pmore, &prval);
+		rados_read_op_omap_get_vals2(read_op, prefix, continue_from, 5001, &iter, &pmore, &prval);
 		ret = rados_read_op_operate(read_op, client->bucket_io_ctx, client->bucket_name, 0);
 
 		if (ret != 0 || prval != 0) {
@@ -524,6 +524,9 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 						encoding_type = strdup(query->value);
 					}
 					if (strcmp(query->key, "continuation-token") == 0) {
+						continue_from = strdup(query->value);
+					}
+					if (strcmp(query->key, "marker") == 0) {
 						continue_from = strdup(query->value);
 					}
 				}
@@ -582,14 +585,17 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 			if (pmore) {
 				// cont. token should not be object name, but...
 				node = xmlNewChild(root_node, NULL, BAD_CAST "NextContinuationToken", BAD_CAST last_obj_name);
+				node = xmlNewChild(root_node, NULL, BAD_CAST "NextMarker", BAD_CAST last_obj_name);
 				node = xmlNewChild(root_node, NULL, BAD_CAST "IsTruncated", BAD_CAST "true");
 			}
 			else {
 				node = xmlNewChild(root_node, NULL, BAD_CAST "IsTruncated", BAD_CAST "false");
 			}
 
-			if (continue_from)
+			if (continue_from) {
 				node = xmlNewChild(root_node, NULL, BAD_CAST "ContinuationToken", BAD_CAST continue_from);
+				node = xmlNewChild(root_node, NULL, BAD_CAST "NextMarker", BAD_CAST continue_from);
+			}
 
 			if (location) {
 				node = xmlNewChild(root_node, NULL, BAD_CAST "LocationConstraint", BAD_CAST "default");

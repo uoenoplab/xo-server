@@ -21,8 +21,8 @@
 
 #include "proto/socket_serialize.pb-c.h"
 
-#define USE_TC
-#define TC_OFFLOAD true
+//#define USE_TC
+//#define TC_OFFLOAD false
 
 zlog_category_t *zlog_handoff;
 
@@ -713,6 +713,38 @@ static void handoff_out_send_done(struct handoff_out *out_ctx)
 	}
 }
 
+//static int hex2num(char c)
+//{
+//        if (c >= '0' && c <= '9')
+//                return c - '0';
+//        if (c >= 'a' && c <= 'f')
+//                return c - 'a' + 10;
+//        if (c >= 'A' && c <= 'F')
+//                return c - 'A' + 10;
+//        return -1;
+//}
+//
+//static int hwaddr_aton(const char *txt, __u8 *addr)
+//{
+//        int i;
+//
+//        for (i = 0; i < 6; i++) {
+//        int a, b;
+//
+//        a = hex2num(*txt++);
+//        if (a < 0)
+//                return -1;
+//        b = hex2num(*txt++);
+//        if (b < 0)
+//                return -1;
+//        *addr++ = (a << 4) | b;
+//        if (i < 5 && *txt++ != ':')
+//                return -1;
+//        }
+//
+//        return 0;
+//}
+
 void handoff_out_recv(struct handoff_out *out_ctx)
 {
 	if (out_ctx->recv_protobuf == NULL) {
@@ -777,6 +809,9 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		// normal handoff
 		// insert redirection rule: peer mac is fake server mac
 #ifdef USE_TC
+		//const char *outgoing_mac_str = "a0:88:c2:46:bd:7f";
+		//uint8_t outgoing_mac[6];
+		//hwaddr_aton(outgoing_mac_str, outgoing_mac);
 		ret = apply_redirection(migration_info->peer_addr, migration_info->self_addr,
 					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
 					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
@@ -814,8 +849,13 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		// remove src IP modification
 		zlog_debug(zlog_handoff, "HANDOFF_OUT Handing connection back to original server or conn reset (osd=%d,conn=%d,port=%d)",
 					out_ctx->client->to_migrate, out_ctx->client->fd, ntohs(out_ctx->client->client_port));
+#ifdef USE_TC
 		ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port);
+#else
+		ret = remove_redirection_ebpf(migration_info->self_addr, migration_info->peer_addr,
+					migration_info->self_port, migration_info->peer_port);
+#endif
 		assert(ret == 0);
 		zlog_debug(zlog_handoff, "Removed src ip modification client(%" PRIu64 ":%d) self(%" PRIu64 ":%d)",
 					migration_info->peer_addr, ntohs(migration_info->peer_port),
@@ -1350,10 +1390,24 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 		handoff_in_deserialize(in_ctx, migration_info);
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Deserialize connection (in_ctx->fd=%d)", in_ctx->fd);
 		// apply src IP modification
+#ifdef USE_TC
 		ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
 					migration_info->self_port, migration_info->peer_port,
 					migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
 					htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false, false); // offst self port
+#else
+		ret = apply_redirection_ebpf(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
+					migration_info->self_port, migration_info->peer_port,
+					migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
+					htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false); // offst self port
+#endif
+		//const char *outgoing_mac_str = "3c:ec:ef:60:5b:48";
+		//uint8_t outgoing_mac[6];
+		//sscanf(outgoing_mac, "%x:%x:%x:%x:%x:%x", &outgoing_mac_str[0], &outgoing_mac_str[0], &outgoing_mac_str[1], &outgoing_mac_str[2], &outgoing_mac_str[3], &outgoing_mac_str[4], &outgoing_mac_str[5]);
+		//ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
+		//			migration_info->self_port, migration_info->peer_port,
+		//			migration_info->self_addr, outgoing_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
+		//			htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false, false); // offst self port
 		assert(ret == 0);
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Applied source IP modification (in_ctx->fd=%d)", in_ctx->fd);
 	} else if (migration_info->msg_type == HANDOFF_BACK_REQUEST) {

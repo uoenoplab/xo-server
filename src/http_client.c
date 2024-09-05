@@ -9,6 +9,7 @@
 #include "http_client.h"
 #include "object_store.h"
 #include "osd_mapping.h"
+#include <netinet/tcp.h>
 
 bool enable_migration = false;
 
@@ -29,9 +30,18 @@ int send_client_data(struct http_client *client)
 		iov_count++;
 	}
 
+//	struct tcp_info info_before, info_after;
+//
+//	socklen_t slen = sizeof(info_before);
+//	int err = getsockopt(client->fd, IPPROTO_TCP, TCP_INFO, &info_before, &slen);
+//	assert(err == 0);
+
 	//zlog_debug(zlog_object_store, "to writev");
 	ssize_t ret = writev(client->fd, iov, iov_count);
+//	ssize_t original_ret = ret;
 	if (ret > 0) {
+		//err = getsockopt(client->fd, IPPROTO_TCP, TCP_INFO, &info_after, &slen);
+		//assert(err == 0);
 		// response is not complete sent
 		if (client->response_sent != client->response_size) {
 			size_t response_left = client->response_size - client->response_sent;
@@ -46,7 +56,11 @@ int send_client_data(struct http_client *client)
 		}
 
 		client->data_payload_sent += ret;
-		zlog_debug(zlog_object_store, "writev (fd=%d,port=%d) called %ld/%ld %ld/%ld", client->fd, ntohs(client->client_port), client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
+		//zlog_debug(zlog_object_store, "writev ret=%d (fd=%d,port=%d) called (%ld/%ld,%ld/%ld) tcpi_snd_cwnd (%u->%u) tcpi_lost (%u->%u) tcpi_last_data_sent (%u->%u) tcpi_retrans (%u->%u)", original_ret, client->fd, ntohs(client->client_port), client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size, info_before.tcpi_snd_cwnd, info_after.tcpi_snd_cwnd, info_before.tcpi_lost, info_after.tcpi_lost, info_before.tcpi_last_data_sent, info_after.tcpi_last_data_sent, info_before.tcpi_retrans, info_after.tcpi_retrans);
+		//fflush(stdout);
+		//if (info_after.tcpi_snd_cwnd < info_before.tcpi_snd_cwnd) {
+		//	exit(1);
+		//}
 	} else {
 		if (ret == 0 || (ret == -1 && errno != EAGAIN)) {
 			zlog_error(zlog_object_store, "writev returned %d on (fd=%d,port=%d) (%s)\n", ret, client->fd, ntohs(client->client_port), strerror(errno));
