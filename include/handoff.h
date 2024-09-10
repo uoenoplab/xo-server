@@ -29,6 +29,8 @@
 #include "zlog.h"
 
 extern zlog_category_t *zlog_handoff;
+extern bool use_tc;
+extern bool tc_offload;
 
 enum {
         HANDOFF_REQUEST,

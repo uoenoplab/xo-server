@@ -561,7 +561,8 @@ static void *conn_wait(void *arg)
 
 						if (osd_arr_index < num_peers) {
 							zlog_info(zlog_handoff, "HANDOFF_IN_EVENT Accepted handoff_in (in_fd=%d,host=%s:%d,osd=%d)", in_fd, osd_addr_strs[i], ntohs(in_addr.sin_port), osd_ids[i]);
-						} else {
+						}
+						else {
 							zlog_fatal(zlog_handoff, "HANDOFF_IN_EVENT Unkown handoff_in client %s, not in osd list, drop", inet_ntoa(in_addr.sin_addr));
 							close(in_fd);
 							exit(EXIT_FAILURE);
@@ -815,8 +816,8 @@ int main(int argc, char *argv[])
 	signal(SIGPIPE, SIG_IGN);
 
 #if USE_MIGRATION
-	if (argc != 4) {
-		fprintf(stderr, "Usage: %s [interface] [threads] [enable migration (0/1)]\n", argv[0]);
+	if (argc != 6) {
+		fprintf(stderr, "Usage: %s [interface] [threads] [enable migration (0/1)] [use TC] [TC offload]\n", argv[0]);
 #else
 	if (argc != 3) {
 		fprintf(stderr, "Usage: %s [interface] [threads]\n", argv[0]);
@@ -829,12 +830,24 @@ int main(int argc, char *argv[])
 		enable_migration = true;
 	else
 		enable_migration = false;
-	zlog_info(zlog_server, "Connection migration: %s", enable_migration ? "enabled" : "disabled");
 
 	// initialize libforward-tc
 	err = init_forward(argv[1], "ingress", "1:");
 	assert(err >= 0);
 
+	if (atoi(argv[4]) == 1)
+		use_tc = true;
+	else
+		use_tc = false;
+
+	if (atoi(argv[4]) == 1)
+		tc_offload = true;
+	else
+		tc_offload = false;
+
+	zlog_info(zlog_server, "Connection migration: %s", enable_migration ? "enabled" : "disabled");
+	if (enable_migration)
+		zlog_info(zlog_server, "Use TC: %s (%s offload)", use_tc ? "yes" : "no", tc_offload ? "with" : "without");
 #endif
 	err = tls_init();
 	if (err < 0) {
