@@ -1427,11 +1427,31 @@ if (use_tc) {
 		if (migration_info->acting_primary_osd_id == get_my_osd_id()) {
 			zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Migration target is current node, deserialize (in_ctx->fd=%d)", in_ctx->fd);
 			handoff_in_deserialize(in_ctx, migration_info);
+			// we are safe to remove previous redir to fake server there since we
+			// either have a working fd or blocked incoming packets
+			if (use_tc) {
+				ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+							migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+				assert(ret == 0);
+			}
+			else {
+				ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+							migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+				assert(ret == 0);
+			}
 		} else {
 			zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Migration target is not current node, rehandoff to target (osd=%d,in_ctx->fd=%d)",
 				migration_info->acting_primary_osd_id, in_ctx->fd);
 
 			handoff_out_serialize_rehandoff(&in_ctx->client_to_handoff_again, migration_info);
+			// we are safe to remove previous redir to fake server there since we
+			// either have a working fd or blocked incoming packets
+			// don't remove eBPF because redir rule should be rewritten to block rule by handoff_out_serialize_rehandoff
+			if (use_tc) {
+				ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+							migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+				assert(ret == 0);
+			}
 		}
 		// we are safe to remove previous redir to fake server there since we
 		// either have a working fd or blocked incoming packets
@@ -1439,13 +1459,13 @@ if (use_tc) {
 					osd_ids[in_ctx->osd_arr_index],
 					migration_info->peer_addr, ntohs(migration_info->peer_port),
 					migration_info->self_addr, ntohs(migration_info->self_port) - get_my_osd_id() - 1);
-//#ifdef USE_TC
-if (use_tc) {
-		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
-		assert(ret == 0);
+////#ifdef USE_TC
+//if (use_tc) {
+//		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+//					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+//		assert(ret == 0);
 //#else
-}
+//}
 //else {
 //		ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 //					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
