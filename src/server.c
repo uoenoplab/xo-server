@@ -840,7 +840,7 @@ int main(int argc, char *argv[])
 	else
 		use_tc = false;
 
-	if (atoi(argv[4]) == 1)
+	if (atoi(argv[5]) == 1)
 		tc_offload = true;
 	else
 		tc_offload = false;
