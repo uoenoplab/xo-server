@@ -17,6 +17,24 @@ extern zlog_category_t *zlog_queue;
 //        RULE_REMOVE
 //} operation_t;
 
+struct rule_args {
+	bool skip;
+//	operation_t op;
+	uint32_t src_ip;
+	uint32_t dst_ip;
+	uint16_t src_port;
+	uint16_t dst_port;
+	uint32_t new_src_ip;
+	uint8_t new_src_mac[6];
+	uint32_t new_dst_ip;
+	uint8_t new_dst_mac[6];
+	uint16_t new_src_port;
+	uint16_t new_dst_port;
+	bool block;
+	bool hw_offload;
+};
+
+
 typedef struct rule_args rule_args_t;
 
 typedef struct
@@ -34,7 +52,7 @@ typedef struct
 void rule_queue_init(rule_queue_t *q, int q_size);
 void rule_queue_destroy(rule_queue_t *q);
 bool rule_enqueue(rule_queue_t *q, rule_args_t *arg);
-bool rule_in_queue(int client_port, rule_queue_t *q);
+bool rule_in_queue(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, rule_queue_t *q);
 void *rule_q_consumer(void *queue);
 
 #endif

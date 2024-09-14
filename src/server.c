@@ -20,6 +20,7 @@
 #include <netinet/tcp.h>
 #include <net/if_arp.h>
 
+#include "queue.h"
 #include "http_client.h"
 #include "tls.h"
 #include "osd_mapping.h"
@@ -92,36 +93,36 @@ void handleCtrlC(int signum)
 
 struct cache_entry {
     struct in_addr ip_addr; // IP address
-    uint8_t mac[6];         // MAC address
-    int valid;              // Validity flag to check if entry is used
+    uint8_t mac[6];	 // MAC address
+    int valid;	      // Validity flag to check if entry is used
 };
 
 struct cache_entry mac_cache[MAC_CACHE_SIZE] = {0};  // Cache initialization
 
 static int get_mac_from_cache(struct in_addr ip_addr, uint8_t *mac) {
     for (int i = 0; i < MAC_CACHE_SIZE; i++) {
-        if (mac_cache[i].valid && mac_cache[i].ip_addr.s_addr == ip_addr.s_addr) {
-            memcpy(mac, mac_cache[i].mac, sizeof(mac));
-            return 1; // MAC found in cache
-        }
+	if (mac_cache[i].valid && mac_cache[i].ip_addr.s_addr == ip_addr.s_addr) {
+	    memcpy(mac, mac_cache[i].mac, sizeof(mac));
+	    return 1; // MAC found in cache
+	}
     }
     return 0; // Not found
 }
 
 static void add_mac_to_cache(struct in_addr ip_addr, uint8_t *mac) {
     for (int i = 0; i < MAC_CACHE_SIZE; i++) {
-        if (!mac_cache[i].valid) {  // Check for the first unused spot
-            mac_cache[i].ip_addr = ip_addr;
-            memcpy(mac_cache[i].mac, mac, sizeof(mac_cache[i].mac));
-            mac_cache[i].valid = 1;
-            return;
-        }
+	if (!mac_cache[i].valid) {  // Check for the first unused spot
+	    mac_cache[i].ip_addr = ip_addr;
+	    memcpy(mac_cache[i].mac, mac, sizeof(mac_cache[i].mac));
+	    mac_cache[i].valid = 1;
+	    return;
+	}
     }
 }
 
 static int get_mac_address(const char *ifname, struct sockaddr_in addr, uint8_t *mac) {
     if (get_mac_from_cache(addr.sin_addr, mac)) {
-        return 0; // MAC found in cache, return immediately
+	return 0; // MAC found in cache, return immediately
     }
 
     struct arpreq arp_req;
@@ -132,16 +133,16 @@ static int get_mac_address(const char *ifname, struct sockaddr_in addr, uint8_t 
     sin->sin_addr = addr.sin_addr;
 
     if ((sock_fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        perror("socket failed");
-        zlog_error(zlog_server, "socket creation failed: %s", strerror(errno));
-        return -1;
+	perror("socket failed");
+	zlog_error(zlog_server, "socket creation failed: %s", strerror(errno));
+	return -1;
     }
 
     strncpy(arp_req.arp_dev, ifname, IFNAMSIZ-1);
     if (ioctl(sock_fd, SIOCGARP, &arp_req) == -1) {
-        zlog_error(zlog_server, "ioctl SIOCGARP failed: %s", strerror(errno));
-        close(sock_fd);
-        return -1;
+	zlog_error(zlog_server, "ioctl SIOCGARP failed: %s", strerror(errno));
+	close(sock_fd);
+	return -1;
     }
 
     memcpy(mac, arp_req.arp_ha.sa_data, sizeof(uint8_t) * 6);
@@ -177,7 +178,7 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	// Accept a new client connection
 	new_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
 	if (new_socket == -1) {
-        	zlog_error(zlog_server, "Fail to accept new client connection: %s", strerror(errno));
+		zlog_error(zlog_server, "Fail to accept new client connection: %s", strerror(errno));
 		return;
 	}
 
@@ -210,7 +211,7 @@ void handle_new_connection(int epoll_fd, const char *ifname, int server_fd, int 
 	set_socket_non_blocking(new_socket);
 
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &event) == -1) {
-        	zlog_error(zlog_server, "Fail to add new client conn to epoll: %s", strerror(errno));
+		zlog_error(zlog_server, "Fail to add new client conn to epoll: %s", strerror(errno));
 		close(new_socket);
 		free_http_client(client);
 	}
@@ -785,6 +786,14 @@ int main(int argc, char *argv[])
 		return -2;
 	}
 
+	zlog_queue = zlog_get_category("queue");
+	if (!zlog_queue) {
+		printf("get queue zlog fail\n");
+		zlog_fini();
+		return -2;
+	}
+
+
 	zlog_server = zlog_get_category("server");
 	if (!zlog_server) {
 		printf("get server zlog fail\n");
@@ -816,8 +825,8 @@ int main(int argc, char *argv[])
 	signal(SIGPIPE, SIG_IGN);
 
 #if USE_MIGRATION
-	if (argc != 6) {
-		fprintf(stderr, "Usage: %s [interface] [threads] [enable migration (0/1)] [use TC] [TC offload]\n", argv[0]);
+	if (argc != 7) {
+		fprintf(stderr, "Usage: %s [interface] [threads] [enable migration (0/1)] [use TC] [TC offload] [use hybrid if TC offload = 1]\n", argv[0]);
 #else
 	if (argc != 3) {
 		fprintf(stderr, "Usage: %s [interface] [threads]\n", argv[0]);
@@ -845,9 +854,14 @@ int main(int argc, char *argv[])
 	else
 		tc_offload = false;
 
+	if (atoi(argv[6]) == 1)
+		tc_hybrid = true;
+	else
+		tc_hybrid = false;
+
 	zlog_info(zlog_server, "Connection migration: %s", enable_migration ? "enabled" : "disabled");
 	if (enable_migration)
-		zlog_info(zlog_server, "Use TC: %s (%s offload)", use_tc ? "yes" : "no", tc_offload ? "with" : "without");
+		zlog_info(zlog_server, "Use TC: %s (%s offload) %s eBPF hybrid", use_tc ? "yes" : "no", tc_offload ? "with" : "without", tc_hybrid ? "with" : "without");
 #endif
 	err = tls_init();
 	if (err < 0) {
@@ -909,6 +923,36 @@ int main(int argc, char *argv[])
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGUSR1, &sa, NULL);
 
+#ifdef USE_MIGRATION
+	pthread_t rule_consumer;
+
+	if (use_tc && tc_offload && tc_hybrid) {
+		/* initialize rule queue */
+		int rc;
+		q = malloc(sizeof(rule_queue_t));
+		if (!q)
+		{
+			zlog_error(zlog_queue, "Failed to allocate memory for rule queue");
+			exit(EXIT_FAILURE);
+		}
+		rule_queue_init(q, Q_SIZE);
+
+		/* set cpu for the consumer thread */
+		CPU_ZERO(&cpus);
+		CPU_SET(0, &cpus);
+
+		/* create the consumer thread */
+		//rc = pthread_attr_setsigmask_np(&attr, &sigmask);
+		//assert(rc == 0);
+		rc = pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
+		assert(rc == 0);
+		rc = pthread_create(&rule_consumer, &attr, &rule_q_consumer, q);
+		assert(rc == 0);
+		rc = pthread_detach(rule_consumer);
+		assert(rc == 0);
+	}
+#endif
+
 	zlog_info(zlog_server, "Launching %ld threads", nproc);
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
@@ -942,6 +986,12 @@ int main(int argc, char *argv[])
 		}
 	}
 
+#ifdef USE_MIGRATION
+	//if (use_tc && tc_offload && tc_hybrid) {
+	//	rule_queue_destroy(q);
+	//}
+#endif
+
 	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);
 
@@ -951,6 +1001,7 @@ int main(int argc, char *argv[])
 
 	fini_forward();
 	fini_forward_ebpf();
+	zlog_info(zlog_server, "%s terminated", argv[0]);
 	zlog_fini();
 
 	return 0;
