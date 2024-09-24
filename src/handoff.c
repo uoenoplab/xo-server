@@ -26,6 +26,9 @@
 
 bool use_tc = false;
 bool tc_offload = false;
+bool tc_hybrid = false;
+
+rule_queue_t *q;
 
 zlog_category_t *zlog_handoff;
 
@@ -709,7 +712,7 @@ static void handoff_out_send_done(struct handoff_out *out_ctx)
 
 	uint32_t magic_number = UINT32_MAX;
 	int ret = send(out_ctx->fd, &magic_number,
-		sizeof(magic_number), NULL);
+		sizeof(magic_number), 0);
 	if (ret != sizeof(magic_number)) {
 		zlog_fatal(zlog_handoff, "Fail to send handoff_out magic number %" PRIu32 ": ret=%d", magic_number, ret);
 		exit(EXIT_FAILURE);
@@ -811,61 +814,72 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	if (out_ctx->client->from_migrate == -1) {
 		// normal handoff
 		// insert redirection rule: peer mac is fake server mac
-//#ifdef USE_TC
-if (use_tc) {
-		//const char *outgoing_mac_str = "a0:88:c2:46:bd:7f";
-		//uint8_t outgoing_mac[6];
-		//hwaddr_aton(outgoing_mac_str, outgoing_mac);
-		ret = apply_redirection(migration_info->peer_addr, migration_info->self_addr,
-					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
-					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
-					migration_info->peer_port, migration_info->self_port, false, tc_offload); //TC_OFFLOAD);
-		assert(ret == 0);
-//#else
-} else {
-		ret = apply_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
-					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
-					migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
-					migration_info->peer_port, migration_info->self_port, false);
-		assert(ret == 0);
-//#endif
-}
+		if (use_tc && !tc_hybrid) {
+			// case 1: only TC(-sw/hw)
+			ret = apply_redirection(migration_info->peer_addr, migration_info->self_addr,
+						migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
+						migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
+						migration_info->peer_port, migration_info->self_port, false, tc_offload); //TC_OFFLOAD);
+			assert(ret == 0);
+		}
+		else {
+			ret = apply_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+						migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
+						migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
+						migration_info->peer_port, migration_info->self_port, false);
+			assert(ret == 0);
+
+			if (tc_hybrid) {
+				rule_args_t args;
+				args.skip = false;
+				args.in_progress = false;
+				args.src_ip = migration_info->peer_addr;
+				args.dst_ip = migration_info->self_addr;
+				args.src_port = migration_info->peer_port;
+				args.dst_port = htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1);
+				args.new_src_ip = migration_info->peer_addr;
+				memcpy(args.new_src_mac, my_mac, sizeof(uint8_t) * 6);
+				args.new_dst_ip = osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr;
+				memcpy(args.new_dst_mac, fake_server_mac, sizeof(uint8_t) * 6);
+				args.new_src_port = migration_info->peer_port;
+				args.new_dst_port = migration_info->self_port;
+				args.block = false;
+				args.hw_offload = tc_offload;
+				rule_enqueue(q, &args);
+			}
+		}
 		zlog_debug(zlog_handoff, "HANDOFF_OUT Apply redirection rule (osd=%d,out_ctx->fd=%d,fd=%d) client(%" PRIu64 ":%d) server(%" PRIu64 ":%d) to fake server(%u:%d)",
 				out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd,
 				migration_info->peer_addr, ntohs(migration_info->peer_port),
 				migration_info->self_addr, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
 				osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, ntohs(migration_info->self_port));
 
-		// remove blocking
-		zlog_debug(zlog_handoff, "HANDOFF_OUT To remove blocking rule after apply redirection (osd=%d,client=%" PRIu64 ":%d,original_server=%" PRIu64 ":%d,out_ctx->fd=%d,fd=%d)",
-			out_ctx->client->to_migrate,
-			migration_info->peer_addr, ntohs(migration_info->peer_port),
-			migration_info->self_addr, ntohs(migration_info->self_port) - get_my_osd_id() - 1,
-			out_ctx->fd, out_ctx->client->fd);
-// we need to remove redirection if only TC is used.
-// redirection should not be removed when eBPF is used as blocking will be updated to forwarding
-//#ifdef USE_TC
-if (use_tc) {
-		ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
-					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
-		assert(ret == 0);
-//#endif
-}
+		// we need to remove redirection if only TC is used.
+		// redirection should not be removed when eBPF is used as blocking will be updated to forwarding
+		//#ifdef USE_TC
+		if (use_tc && !tc_hybrid) {
+			// remove blocking
+			zlog_debug(zlog_handoff, "HANDOFF_OUT To remove blocking rule after apply redirection (osd=%d,client=%" PRIu64 ":%d,original_server=%" PRIu64 ":%d,out_ctx->fd=%d,fd=%d)",
+				out_ctx->client->to_migrate,
+				migration_info->peer_addr, ntohs(migration_info->peer_port),
+				migration_info->self_addr, ntohs(migration_info->self_port) - get_my_osd_id() - 1,
+				out_ctx->fd, out_ctx->client->fd);
+			ret = remove_redirection_ebpf(migration_info->peer_addr, migration_info->self_addr,
+						migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+			assert(ret == 0);
+		}
 	} else {
 		// handoff back and handoff reset
 		// remove src IP modification
 		zlog_debug(zlog_handoff, "HANDOFF_OUT Handing connection back to original server or conn reset (osd=%d,conn=%d,port=%d)",
 					out_ctx->client->to_migrate, out_ctx->client->fd, ntohs(out_ctx->client->client_port));
-//#ifdef USE_TC
-if (use_tc) {
-		ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
-					migration_info->self_port, migration_info->peer_port);
-//#else
-} else {
-		ret = remove_redirection_ebpf(migration_info->self_addr, migration_info->peer_addr,
-					migration_info->self_port, migration_info->peer_port);
-//#endif
-}
+		if (use_tc) {
+			ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
+						migration_info->self_port, migration_info->peer_port);
+		} else {
+			ret = remove_redirection_ebpf(migration_info->self_addr, migration_info->peer_addr,
+						migration_info->self_port, migration_info->peer_port);
+		}
 		assert(ret == 0);
 		zlog_debug(zlog_handoff, "Removed src ip modification client(%" PRIu64 ":%d) self(%" PRIu64 ":%d)",
 					migration_info->peer_addr, ntohs(migration_info->peer_port),
@@ -1400,27 +1414,17 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 		handoff_in_deserialize(in_ctx, migration_info);
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Deserialize connection (in_ctx->fd=%d)", in_ctx->fd);
 		// apply src IP modification
-//#ifdef USE_TC
-if (use_tc) {
-		ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
-					migration_info->self_port, migration_info->peer_port,
-					migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
-					htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false, false); // offst self port
-//#else
-} else {
-		ret = apply_redirection_ebpf(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
-					migration_info->self_port, migration_info->peer_port,
-					migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
-					htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false); // offst self port
-//#endif
-}
-		//const char *outgoing_mac_str = "3c:ec:ef:60:5b:48";
-		//uint8_t outgoing_mac[6];
-		//sscanf(outgoing_mac, "%x:%x:%x:%x:%x:%x", &outgoing_mac_str[0], &outgoing_mac_str[0], &outgoing_mac_str[1], &outgoing_mac_str[2], &outgoing_mac_str[3], &outgoing_mac_str[4], &outgoing_mac_str[5]);
-		//ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
-		//			migration_info->self_port, migration_info->peer_port,
-		//			migration_info->self_addr, outgoing_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
-		//			htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false, false); // offst self port
+		if (use_tc) {
+			ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
+						migration_info->self_port, migration_info->peer_port,
+						migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
+						htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false, false); // offst self port
+		} else {
+			ret = apply_redirection_ebpf(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
+						migration_info->self_port, migration_info->peer_port,
+						migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
+						htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false); // offst self port
+		}
 		assert(ret == 0);
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Applied source IP modification (in_ctx->fd=%d)", in_ctx->fd);
 	} else if (migration_info->msg_type == HANDOFF_BACK_REQUEST) {
@@ -1429,12 +1433,19 @@ if (use_tc) {
 			handoff_in_deserialize(in_ctx, migration_info);
 			// we are safe to remove previous redir to fake server there since we
 			// either have a working fd or blocked incoming packets
-			if (use_tc) {
+			if (use_tc && !tc_hybrid) {
 				ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 							migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
 				assert(ret == 0);
 			}
 			else {
+				if (tc_hybrid) {
+					if (!rule_in_queue(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr, migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1), q)) {
+						ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+									migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+						assert(ret == 0);
+					}
+				}
 				ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 							migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
 				assert(ret == 0);
@@ -1447,10 +1458,17 @@ if (use_tc) {
 			// we are safe to remove previous redir to fake server there since we
 			// either have a working fd or blocked incoming packets
 			// don't remove eBPF because redir rule should be rewritten to block rule by handoff_out_serialize_rehandoff
-			if (use_tc) {
+			if (use_tc && !tc_hybrid) {
 				ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
 							migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
 				assert(ret == 0);
+			}
+			else if (use_tc && tc_hybrid) {
+				if (!rule_in_queue(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr, migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1), q)) {
+					ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+								migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+					assert(ret == 0);
+				}
 			}
 		}
 		// we are safe to remove previous redir to fake server there since we
@@ -1459,36 +1477,30 @@ if (use_tc) {
 					osd_ids[in_ctx->osd_arr_index],
 					migration_info->peer_addr, ntohs(migration_info->peer_port),
 					migration_info->self_addr, ntohs(migration_info->self_port) - get_my_osd_id() - 1);
-////#ifdef USE_TC
-//if (use_tc) {
-//		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-//					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
-//		assert(ret == 0);
-//#else
-//}
-//else {
-//		ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-//					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
-//		assert(ret == 0);
-////#endif
-//}
 	} else if (migration_info->msg_type == HANDOFF_RESET_REQUEST) {
-//#ifdef USE_TC
-if (use_tc) {
-		ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
-		assert(ret == 0);
-//#else
-} else {
-		ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
-					migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
-		assert(ret == 0);
-//#endif
-}
+		if (use_tc && !tc_hybrid) {
+			ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+						migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+			assert(ret == 0);
+		}
+		else {
+			if (tc_hybrid) {
+				if (!rule_in_queue(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr, migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1), q)) {
+					ret = remove_redirection(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+								migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+					assert(ret == 0);
+				}
+			}
+
+			ret = remove_redirection_ebpf(migration_info->peer_addr, get_my_osd_addr().sin_addr.s_addr,
+						migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1));
+			assert(ret == 0);
+		}
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_RESET_REQUEST Remove redirection rule from client to fake server (osd=%d,client=%" PRIu64":%d,orignal_server=%" PRIu64":%d)",
 				osd_ids[in_ctx->osd_arr_index],
 				migration_info->peer_addr, ntohs(migration_info->peer_port),
 				migration_info->self_addr, ntohs(migration_info->self_port) - get_my_osd_id() - 1);
+//exit(1);
 	} else {
 		zlog_fatal(zlog_handoff, "Can only handle HANDOFF_REQUEST or HANDOFF_BACK_REQUEST msg");
 		exit(EXIT_FAILURE);

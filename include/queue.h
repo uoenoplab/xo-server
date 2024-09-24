@@ -18,7 +18,8 @@ extern zlog_category_t *zlog_queue;
 //} operation_t;
 
 struct rule_args {
-	bool skip;
+	volatile bool skip;
+	volatile bool in_progress;
 //	operation_t op;
 	uint32_t src_ip;
 	uint32_t dst_ip;
