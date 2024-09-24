@@ -102,7 +102,7 @@ struct cache_entry mac_cache[MAC_CACHE_SIZE] = {0};  // Cache initialization
 static int get_mac_from_cache(struct in_addr ip_addr, uint8_t *mac) {
     for (int i = 0; i < MAC_CACHE_SIZE; i++) {
 	if (mac_cache[i].valid && mac_cache[i].ip_addr.s_addr == ip_addr.s_addr) {
-	    memcpy(mac, mac_cache[i].mac, sizeof(mac));
+	    memcpy(mac, mac_cache[i].mac, sizeof(uint8_t)*6);
 	    return 1; // MAC found in cache
 	}
     }
@@ -926,7 +926,7 @@ int main(int argc, char *argv[])
 #ifdef USE_MIGRATION
 	pthread_t rule_consumer;
 
-	if (use_tc && tc_offload && tc_hybrid) {
+	if (use_tc && tc_hybrid) {
 		/* initialize rule queue */
 		int rc;
 		q = malloc(sizeof(rule_queue_t));

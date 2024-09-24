@@ -63,7 +63,7 @@ int send_client_data(struct http_client *client)
 		//}
 	} else {
 		if (ret == 0 || (ret == -1 && errno != EAGAIN)) {
-			zlog_error(zlog_object_store, "writev returned %d on (fd=%d,port=%d) (%s)\n", ret, client->fd, ntohs(client->client_port), strerror(errno));
+			zlog_error(zlog_object_store, "writev returned %ld on (fd=%d,port=%d) (%s)\n", ret, client->fd, ntohs(client->client_port), strerror(errno));
 			return -1;
 		}
 	}
@@ -485,8 +485,8 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	client->read_op = rados_create_read_op();
 	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_completion));
 	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_head_read_completion));
-	client->bucket_io_ctx = -1;
-	client->data_io_ctx = -1;
+	client->bucket_io_ctx = NULL;
+	client->data_io_ctx = NULL;
 
 	client->prval = 0;
 

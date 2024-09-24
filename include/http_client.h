@@ -91,8 +91,8 @@ struct http_client {
 	size_t num_fields;
 
 	pthread_mutex_t mutex;
-	rados_ioctx_t *bucket_io_ctx;
-	rados_ioctx_t *data_io_ctx;
+	rados_ioctx_t bucket_io_ctx;
+	rados_ioctx_t data_io_ctx;
 	rados_completion_t aio_completion;
 	rados_completion_t aio_head_read_completion;
 

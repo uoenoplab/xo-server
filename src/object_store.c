@@ -56,7 +56,7 @@ void aio_head_read_callback(rados_completion_t comp, void *arg) {
 
 		char *etag = NULL;
 		char *last_modified_datetime_str = NULL;
-		while (rados_getxattrs_next(client->iter, &attr_name, &attr_val, &attr_val_len) == 0 && (attr_name != NULL & attr_val != NULL)) {
+		while (rados_getxattrs_next(client->iter, &attr_name, &attr_val, &attr_val_len) == 0 && (attr_name != NULL && attr_val != NULL)) {
 			if (strcmp(attr_name, "size") == 0) {
 				full_object_size = atol(attr_val);
 			}
