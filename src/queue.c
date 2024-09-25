@@ -56,13 +56,11 @@ bool rule_enqueue(rule_queue_t *q, rule_args_t *arg)
 
 bool rule_in_queue(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, rule_queue_t *q)
 {
-//bool ret = false;
 	pthread_mutex_lock(&q->lock);
 	for (int idx = 0; idx < q->count; idx++) {
 		int i = (q->head + idx) % q->size;
 		if (q->buffer[i].src_ip == src_ip && q->buffer[i].dst_ip == dst_ip &&
 			q->buffer[i].src_port == src_port && q->buffer[i].dst_port == dst_port && q->buffer[i].skip == false) {
-
 			q->buffer[i].skip = true;
 			zlog_debug(zlog_queue, "Marking flow (%d) to skip insertion (head=%d,tail=%d,count=%d)", ntohs(q->buffer[i].src_port), q->head, q->tail, q->count);
 			pthread_mutex_unlock(&q->lock);
@@ -80,44 +78,36 @@ void *rule_q_consumer(void *queue)
 
 	for (;;)
 	{
-		rule_args_t *arg;
+		rule_args_t arg;
 		pthread_mutex_lock(&q->lock);
 		while (q->count == 0)
 		{
 			pthread_cond_wait(&q->not_empty, &q->lock);
 		}
 
-		arg = &(q->buffer[q->head]);
+		memcpy(&arg, &q->buffer[q->head], sizeof(rule_args_t));
+		q->count--;
+		q->head = (q->head + 1) % q->size;
 
-		if (arg->skip)
+		if (arg.skip)
 		{
-			zlog_debug(zlog_queue, "Skipped client port %d (head=%d,tail=%d,count=%d)", ntohs(arg->src_port), q->head, q->tail, q->count);
-			q->count--;
-			q->head = (q->head + 1) % q->size;
-
+			zlog_debug(zlog_queue, "Skipped client port %d (head=%d,tail=%d,count=%d)", ntohs(arg.src_port), q->head, q->tail, q->count);
 			pthread_cond_signal(&q->not_full);
 			pthread_mutex_unlock(&q->lock);
 			continue;
 		}
-		else if (arg->in_progress) {
-			zlog_debug(zlog_queue, "Rule insert in-progress client port %d (head=%d,tail=%d,count=%d)", ntohs(arg->src_port), q->head, q->tail, q->count);
-			pthread_mutex_unlock(&q->lock);
-			continue;
-		}
 
-		arg->in_progress = true;
 		pthread_mutex_unlock(&q->lock);
 
-		zlog_debug(zlog_queue, "Applying redirection rule (%d,%d) (head=%d,tail=%d,count=%d)", ntohs(arg->src_port), ntohs(arg->dst_port), q->head, q->tail, q->count);
+		zlog_debug(zlog_queue, "Applying redirection rule (%d,%d) (head=%d,tail=%d,count=%d)", ntohs(arg.src_port), ntohs(arg.dst_port), q->head, q->tail, q->count);
 		int ret = apply_redirection(
-			arg->src_ip, arg->dst_ip,
-			arg->src_port, arg->dst_port,
-			arg->new_src_ip, arg->new_src_mac,
-			arg->new_dst_ip, arg->new_dst_mac,
-			arg->new_src_port, arg->new_dst_port,
-			arg->block, arg->hw_offload);
+			arg.src_ip, arg.dst_ip,
+			arg.src_port, arg.dst_port,
+			arg.new_src_ip, arg.new_src_mac,
+			arg.new_dst_ip, arg.new_dst_mac,
+			arg.new_src_port, arg.new_dst_port,
+			arg.block, arg.hw_offload);
 		assert(ret == 0);
-		arg->skip = true;
 	}
 
 	zlog_debug(zlog_queue, "Stopping TC-rule consumer thread");
