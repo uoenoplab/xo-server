@@ -351,7 +351,7 @@ static void *conn_wait(void *arg)
 	struct handoff_in handoff_in_ctxs[num_osds];
 	struct handoff_out handoff_out_ctxs[num_peers];
 	memset(handoff_in_ctxs, 0, sizeof(handoff_in_ctxs));
-	memset(handoff_in_ctxs, 0, sizeof(handoff_in_ctxs));
+	memset(handoff_out_ctxs, 0, sizeof(handoff_out_ctxs));
 
 	rados_ioctx_t bucket_io_ctx;
 	rados_ioctx_t data_io_ctx;
