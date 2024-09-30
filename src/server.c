@@ -470,7 +470,7 @@ static void *conn_wait(void *arg)
 	while (server_running) {
 		// Wait for events using epoll
 		memset(events, 0, sizeof(struct epoll_event) * MAX_EVENTS);
-		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, 50);
 		if (event_count == -1) {
 			if (errno == EINTR) {
 				//printf("EINTR\n");
@@ -859,6 +859,16 @@ int main(int argc, char *argv[])
 	else
 		tc_hybrid = false;
 
+#ifdef ASYNC_WRITE
+	zlog_info(zlog_server, "RADO Async Write: enabled");
+#else
+	zlog_info(zlog_server, "RADO Async Write: disabled");
+#endif
+#ifdef ASYNC_READ
+	zlog_info(zlog_server, "RADO Async Read: enabled");
+#else
+	zlog_info(zlog_server, "RADO Async Read: disabled");
+#endif
 	zlog_info(zlog_server, "Connection migration: %s", enable_migration ? "enabled" : "disabled");
 	if (enable_migration)
 		zlog_info(zlog_server, "Use TC: %s (%s offload) %s eBPF hybrid", use_tc ? "yes" : "no", tc_offload ? "with" : "without", tc_hybrid ? "with" : "without");
@@ -923,6 +933,11 @@ int main(int argc, char *argv[])
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGUSR1, &sa, NULL);
 
+	CPU_ZERO(&cpus);
+	CPU_SET(0, &cpus);
+	pthread_t current_thread = pthread_self();
+	pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpus);
+
 #ifdef USE_MIGRATION
 	pthread_t rule_consumer;
 
@@ -939,7 +954,7 @@ int main(int argc, char *argv[])
 
 		/* set cpu for the consumer thread */
 		CPU_ZERO(&cpus);
-		CPU_SET(0, &cpus);
+		CPU_SET(max_cores - 1, &cpus);
 
 		/* create the consumer thread */
 		//rc = pthread_attr_setsigmask_np(&attr, &sigmask);
@@ -960,7 +975,7 @@ int main(int argc, char *argv[])
 		strncpy(param[i].ifname, ifname, 32);
 
 		CPU_ZERO(&cpus);
-		CPU_SET((i + max_cores) % max_cores, &cpus);
+		CPU_SET((i + (max_cores - 1)) % (max_cores - 1), &cpus);
 
 		pthread_attr_setsigmask_np(&attr, &sigmask);
 		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
@@ -987,9 +1002,9 @@ int main(int argc, char *argv[])
 	}
 
 #ifdef USE_MIGRATION
-	//if (use_tc && tc_offload && tc_hybrid) {
-	//	rule_queue_destroy(q);
-	//}
+//	if (use_tc && tc_hybrid) {
+//		rule_queue_destroy(q);
+//	}
 #endif
 
 	rados_shutdown(cluster);
