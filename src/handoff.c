@@ -1466,6 +1466,7 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 			zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_BACK_REQUEST Migration target is not current node, rehandoff to target (osd=%d,in_ctx->fd=%d)",
 				migration_info->acting_primary_osd_id, in_ctx->fd);
 
+			// eBPF blocking rule applied here
 			handoff_out_serialize_rehandoff(&in_ctx->client_to_handoff_again, migration_info);
 			// we are safe to remove previous redir to fake server there since we
 			// either have a working fd or blocked incoming packets
