@@ -447,9 +447,6 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 {
 	int ret = 0;
 
-	UriQueryListA *queryList;
-	int itemCount;
-
 	xmlDocPtr doc = NULL;
 	xmlNodePtr root_node = NULL, node = NULL;/* node pointers */
 
@@ -460,15 +457,73 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 		// if GET bucket service: no objects
 		// check if bucket exist
 		int ret = 1;
+		UriQueryListA *queryList;
+		int itemCount;
 
 		rados_omap_iter_t iter;
 		unsigned char pmore; int prval;
 		char *continue_from = NULL;
 		char *prefix = NULL;
 
+		// go through list of queries
+		bool fetch_owner = false;
+		char *encoding_type = NULL;
+		int list_type = 1;
+		bool versioning = false;
+		bool location = false;
+
+		doc = xmlNewDoc(BAD_CAST "1.0");
+
+		UriUriA uri;
+		const char *errorPos;
+
+		if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
+			zlog_error(zlog_object_store, "Parse uri fail: %s", errorPos);
+			return ;
+		}
+
+		if (uriDissectQueryMallocA(&queryList, &itemCount, uri.query.first, uri.query.afterLast) == URI_SUCCESS) {
+			for (struct UriQueryListStructA *query = queryList; query != NULL; query = query->next) {
+				zlog_debug(zlog_object_store, "Query: (%s,%s)", query->key, query->value);
+				if (strcmp(query->key, "location") == 0) {
+					location = true;
+				}
+				if (strcmp(query->key, "versioning") == 0){
+					versioning = true;
+				}
+				if (strcmp(query->key, "fetch-owner") == 0) {
+					if (strcmp(query->value, "true") == 0)
+						fetch_owner = true;
+				}
+				if (strcmp(query->key, "list-type") == 0) {
+					if (strcmp(query->value, "2") == 0)
+						list_type = 2;
+				}
+				if (strcmp(query->key, "prefix") == 0) {
+					prefix = strdup(query->value);
+				}
+				if (strcmp(query->key, "encoding-type") == 0) {
+					encoding_type = strdup(query->value);
+				}
+				if (strcmp(query->key, "continuation-token") == 0) {
+					continue_from = strdup(query->value);
+				}
+				if (strcmp(query->key, "marker") == 0) {
+					continue_from = strdup(query->value);
+				}
+				if (strcmp(query->key, "start-after") == 0) {
+					continue_from = strdup(query->value);
+				}
+			}
+			uriFreeQueryListA(queryList);
+		}
+
+		if (ret == URI_SUCCESS)
+			uriFreeUriMembersA(&uri);
+
 		rados_read_op_t read_op = rados_create_read_op();
 		rados_read_op_assert_exists(read_op);
-		rados_read_op_omap_get_vals2(read_op, prefix, continue_from, 5001, &iter, &pmore, &prval);
+		rados_read_op_omap_get_vals2(read_op, continue_from, prefix, 1000, &iter, &pmore, &prval);
 		ret = rados_read_op_operate(read_op, client->bucket_io_ctx, client->bucket_name, 0);
 
 		if (ret != 0 || prval != 0) {
@@ -483,59 +538,6 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 			client->data_payload_size = 0;
 		}
 		else {
-			// go through list of queries
-			bool fetch_owner = false;
-			char *encoding_type = NULL;
-			int list_type = 1;
-			bool versioning = false;
-			bool location = false;
-
-			doc = xmlNewDoc(BAD_CAST "1.0");
-
-			UriUriA uri;
-			const char *errorPos;
-
-			if ((ret = uriParseSingleUriA(&uri, client->uri_str, &errorPos)) != URI_SUCCESS) {
-				zlog_error(zlog_object_store, "Parse uri fail: %s", errorPos);
-				return ;
-			}
-
-			if (uriDissectQueryMallocA(&queryList, &itemCount, uri.query.first, uri.query.afterLast) == URI_SUCCESS) {
-				for (struct UriQueryListStructA *query = queryList; query != NULL; query = query->next) {
-					zlog_debug(zlog_object_store, "Query: (%s,%s)", query->key, query->value);
-					if (strcmp(query->key, "location") == 0) {
-						location = true;
-					}
-					if (strcmp(query->key, "versioning") == 0){
-						versioning = true;
-					}
-					if (strcmp(query->key, "fetch-owner") == 0) {
-						if (strcmp(query->value, "true") == 0)
-							fetch_owner = true;
-					}
-					if (strcmp(query->key, "list-type") == 0) {
-						if (strcmp(query->value, "2") == 0)
-							list_type = 2;
-					}
-					if (strcmp(query->key, "prefix") == 0) {
-						prefix = strdup(query->value);
-					}
-					if (strcmp(query->key, "encoding-type") == 0) {
-						encoding_type = strdup(query->value);
-					}
-					if (strcmp(query->key, "continuation-token") == 0) {
-						continue_from = strdup(query->value);
-					}
-					if (strcmp(query->key, "marker") == 0) {
-						continue_from = strdup(query->value);
-					}
-				}
-				uriFreeQueryListA(queryList);
-			}
-
-			if (ret == URI_SUCCESS)
-				uriFreeUriMembersA(&uri);
-
 			// return list inside bucket
 			//if (fetch_owner && list_type == 2) {
 			root_node = xmlNewNode(NULL, BAD_CAST "ListBucketResult");
@@ -594,7 +596,8 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 
 			if (continue_from) {
 				node = xmlNewChild(root_node, NULL, BAD_CAST "ContinuationToken", BAD_CAST continue_from);
-				node = xmlNewChild(root_node, NULL, BAD_CAST "NextMarker", BAD_CAST continue_from);
+				node = xmlNewChild(root_node, NULL, BAD_CAST "Marker", BAD_CAST continue_from);
+				node = xmlNewChild(root_node, NULL, BAD_CAST "StartAfter", BAD_CAST continue_from);
 			}
 
 			if (location) {
@@ -613,10 +616,6 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 			snprintf(client->response, client->response_size, "%s\r\nContent-Length: %d\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, xmlbuf_size, datetime_str);
 			client->response_size--; // we don't send the null
 
-			//client->data_payload = malloc(xmlbuf_size + 1);
-			//client->data_payload = realloc(client->data_payload, xmlbuf_size + 1);
-			//assert(client->data_payload != NULL);
-
 			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
 			client->data_payload[xmlbuf_size] = '\0';
 			client->data_payload_size = xmlbuf_size;
@@ -634,8 +633,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 		if (continue_from) free(continue_from);
 		rados_release_read_op(read_op);
 
-		//send_response(client);
-		//printf("response: %ld %ld\ndata: %ld %ld\n", strlen(client->response), client->response_size, strlen(client->data_payload), client->data_payload_size);
+		printf("response: %ld %ld\ndata: %ld %ld\n", strlen(client->response), client->response_size, strlen(client->data_payload), client->data_payload_size);
 		send_response(client);
 	}
 	else if (strlen(client->bucket_name) != 0 && strlen(client->object_name) != 0) {
