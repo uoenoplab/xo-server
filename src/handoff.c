@@ -790,8 +790,6 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 	if (out_ctx->recv_protobuf_received < out_ctx->recv_protobuf_len)
 		return;
 
-	zlog_debug(zlog_handoff, "HANDOFF_OUT Received response for migration request (osd=%d,out_ctx->fd=%d,fd=%d,port=%d)", out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd, ntohs(out_ctx->client->client_port));
-
 	SocketSerialize *migration_info = socket_serialize__unpack(NULL,
 		out_ctx->recv_protobuf_len, out_ctx->recv_protobuf);
 	if (migration_info == NULL) {
@@ -802,6 +800,8 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		zlog_fatal(zlog_handoff, "HANDOFF_OUT Received migration response not HANDOFF_DONE");
 		exit(EXIT_FAILURE);
 	}
+
+	zlog_debug(zlog_handoff, "HANDOFF_OUT Received response for migration request (osd=%d,psize=%ld,out_ctx->fd=%d,fd=%d,port=%d)", out_ctx->client->to_migrate, migration_info->object_size, out_ctx->fd, out_ctx->client->fd, ntohs(out_ctx->client->client_port));
 
 	free(out_ctx->recv_protobuf);
 	out_ctx->recv_protobuf = NULL;
@@ -846,6 +846,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 				args.block = false;
 				args.hw_offload = tc_offload;
 
+				//if ((migration_info->object_size < 3072 && migration_info->object_size > 5000) || !rule_enqueue(q, &args)) {
 				if (!rule_enqueue(q, &args)) {
 					/* queue is full, insert dummy rule and give up hw rule */
 					ret = apply_redirection_dummy(migration_info->peer_addr, migration_info->self_addr,
@@ -853,16 +854,16 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 								migration_info->peer_addr, my_mac, osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, fake_server_mac,
 								migration_info->peer_port, migration_info->self_port);
 					assert(ret == 0);
-					zlog_debug(zlog_handoff, "Queue full, insert dummy rule instead (osd=%d,out_ctx->fd=%d,fd=%d) client(%" PRIu64 ":%d) server(%" PRIu64 ":%d) to fake server(%u:%d)",
-						out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd,
+					zlog_debug(zlog_handoff, "Queue full or object too small (size=%ld), insert dummy rule instead (osd=%d,out_ctx->fd=%d,fd=%d) client(%" PRIu64 ":%d) server(%" PRIu64 ":%d) to fake server(%u:%d)",
+						migration_info->object_size, out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd,
 						migration_info->peer_addr, ntohs(migration_info->peer_port),
 						migration_info->self_addr, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
 						osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, ntohs(migration_info->self_port));
 				}
 			}
 		}
-		zlog_debug(zlog_handoff, "HANDOFF_OUT Apply redirection rule (osd=%d,out_ctx->fd=%d,fd=%d) client(%" PRIu64 ":%d) server(%" PRIu64 ":%d) to fake server(%u:%d)",
-				out_ctx->client->to_migrate, out_ctx->fd, out_ctx->client->fd,
+		zlog_debug(zlog_handoff, "HANDOFF_OUT Apply redirection rule (osd=%d,size=%ld,out_ctx->fd=%d,fd=%d) client(%" PRIu64 ":%d) server(%" PRIu64 ":%d) to fake server(%u:%d)",
+				out_ctx->client->to_migrate, migration_info->object_size, out_ctx->fd, out_ctx->client->fd,
 				migration_info->peer_addr, ntohs(migration_info->peer_port),
 				migration_info->self_addr, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
 				osd_addrs[out_ctx->osd_arr_index].sin_addr.s_addr, ntohs(migration_info->self_port));
@@ -886,13 +887,13 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 		// remove src IP modification
 		zlog_debug(zlog_handoff, "HANDOFF_OUT Handing connection back to original server or conn reset (osd=%d,conn=%d,port=%d)",
 					out_ctx->client->to_migrate, out_ctx->client->fd, ntohs(out_ctx->client->client_port));
-		if (use_tc) {
+		//if (use_tc) {
 			ret = remove_redirection(migration_info->self_addr, migration_info->peer_addr,
 						migration_info->self_port, migration_info->peer_port);
-		} else {
-			ret = remove_redirection_ebpf(migration_info->self_addr, migration_info->peer_addr,
-						migration_info->self_port, migration_info->peer_port);
-		}
+		//} else {
+		//	ret = remove_redirection_ebpf(migration_info->self_addr, migration_info->peer_addr,
+		//				migration_info->self_port, migration_info->peer_port);
+		//}
 		assert(ret == 0);
 		zlog_debug(zlog_handoff, "Removed src ip modification client(%" PRIu64 ":%d) self(%" PRIu64 ":%d)",
 					migration_info->peer_addr, ntohs(migration_info->peer_port),
@@ -1064,6 +1065,16 @@ static int restore_queue_send(int fd, char *buf, int outq_len, int unsq_len)
 void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migration_info)
 {
 	int ret = -1;
+	uint64_t psize = 0;
+	time_t pmtime;
+
+	rados_completion_t comp;
+//	if ((migration_info->msg_type == HANDOFF_BACK_REQUEST && migration_info->acting_primary_osd_id == get_my_osd_id()) || migration_info->msg_type == HANDOFF_REQUEST) {
+//		ret = rados_aio_create_completion(NULL, NULL, NULL, &comp);
+//		assert(ret == 0);
+//		ret = rados_aio_stat(in_ctx->data_io_ctx, migration_info->object_name, comp, &psize, &pmtime);
+//		assert(ret == 0);
+//	}
 
 	int rfd;
 	struct sockaddr_in server_sin, client_sin;
@@ -1279,7 +1290,15 @@ retry:
 
 	client->fd = rfd;
 
-	zlog_debug(zlog_handoff, "Deserialized: %s (fd=%d,port=%d)", client->uri_str, client->fd, client->client_port);
+//	if ((migration_info->msg_type == HANDOFF_BACK_REQUEST && migration_info->acting_primary_osd_id == get_my_osd_id()) || migration_info->msg_type == HANDOFF_REQUEST) {
+//		ret = rados_aio_wait_for_complete(comp);
+//		assert(ret == 0);
+//		rados_aio_release(comp);
+//		client->object_size = psize;
+//		migration_info->object_size = psize;
+//	}
+
+	zlog_debug(zlog_handoff, "Deserialized: %s (size=%ld) (fd=%d,port=%d)", client->uri_str, psize, client->fd, client->client_port);
 
 	// we only add client into epoll after originaldone received
 	in_ctx->client_for_originaldone = client;
@@ -1427,17 +1446,17 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 		handoff_in_deserialize(in_ctx, migration_info);
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Deserialize connection (in_ctx->fd=%d)", in_ctx->fd);
 		// apply src IP modification
-		if (use_tc) {
+		//if (use_tc) {
 			ret = apply_redirection(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
 						migration_info->self_port, migration_info->peer_port,
 						migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
 						htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false, false); // offst self port
-		} else {
-			ret = apply_redirection_ebpf(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
-						migration_info->self_port, migration_info->peer_port,
-						migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
-						htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false); // offst self port
-		}
+		//} else {
+		//	ret = apply_redirection_ebpf(get_my_osd_addr().sin_addr.s_addr, migration_info->peer_addr,
+		//				migration_info->self_port, migration_info->peer_port,
+		//				migration_info->self_addr, my_mac, migration_info->peer_addr, (uint8_t *)&migration_info->peer_mac,
+		//				htons(ntohs(migration_info->self_port) - osd_ids[in_ctx->osd_arr_index] - 1), migration_info->peer_port, false); // offst self port
+		//}
 		assert(ret == 0);
 		zlog_debug(zlog_handoff, "HANDOFF_IN HANDOFF_REQUEST Applied source IP modification (in_ctx->fd=%d)", in_ctx->fd);
 	} else if (migration_info->msg_type == HANDOFF_BACK_REQUEST) {
@@ -1528,6 +1547,8 @@ void handoff_in_recv(struct handoff_in *in_ctx, bool *ready_to_send, struct http
 	// encode self mac in response for orginal server to perform redirection
 	memcpy(&(migration_info_resp.peer_mac), my_mac, sizeof(uint8_t) * 6);
 
+	// reply object size for original server to determine redirection method
+	migration_info_resp.object_size = migration_info->object_size;
 	migration_info_resp.self_port = migration_info->self_port;
 	migration_info_resp.peer_port = migration_info->peer_port;
 

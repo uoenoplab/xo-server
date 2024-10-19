@@ -58,6 +58,7 @@ struct http_client {
 
 	ssize_t data_payload_sent;
 	ssize_t data_payload_size;
+	ssize_t data_payload_ready;
 	//char *data_payload;
 	char data_payload[8 * 1024 * 1024];
 
@@ -95,6 +96,7 @@ struct http_client {
 	rados_ioctx_t data_io_ctx;
 	rados_completion_t aio_completion;
 	rados_completion_t aio_head_read_completion;
+	int aio_in_progress;
 
 	size_t object_size;
 	size_t object_offset;

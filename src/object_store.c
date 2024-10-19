@@ -7,7 +7,7 @@
 #include "object_store.h"
 #include "osd_mapping.h"
 
-#define FIRST_READ_SIZE sizeof(char) * 1024 * 8192
+#define FIRST_READ_SIZE sizeof(char) * 1024 * 1024
 
 zlog_category_t *zlog_object_store;
 
@@ -29,22 +29,32 @@ void put_object(struct http_client *client, const char *buf, size_t length)
 	}
 }
 
+void aio_read_callback(rados_completion_t comp, void *arg) {
+	int ret = 0;
+	struct http_client *client = (struct http_client*)arg;
+
+	//client->data_payload_ready += client->tail_object_size;
+	client->data_payload_ready = client->object_size;
+	client->aio_in_progress = 0;
+	zlog_debug(zlog_object_store, "second part of object ready to send");
+	send_response(client);
+}
+
 void aio_head_read_callback(rados_completion_t comp, void *arg) {
 	int ret = 0;
 	struct http_client *client = (struct http_client*)arg;
 	char datetime_str[128];
 	get_datetime_str(datetime_str, 128);
+	//client->prval=0;
 
-	if (client->prval != 0) {
+	if (client->prval != 0 && strlen(client->object_name) != 0) {
 		zlog_error(zlog_object_store, "Object %s not found", client->object_name);
 		client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str) + 1;
 		assert(client->response_size <= MAX_RESPONSE_SIZE);
 		snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_NOT_FOUND_HDR, AMZ_REQUEST_ID, datetime_str);
 		client->response_size--;
 
-		//client->data_payload = NULL;
 		client->data_payload_size = 0;
-
 		send_response(client);
 	}
 	else {
@@ -77,20 +87,32 @@ void aio_head_read_callback(rados_completion_t comp, void *arg) {
 		if (etag) free(etag);
 		if (last_modified_datetime_str) free(last_modified_datetime_str);
 
-		if (client->object_size < full_object_size) {
-			size_t tail_size = full_object_size - client->object_size;
-			size_t bytes_read = client->object_size;
-			client->object_size = full_object_size;
+		/* object size not ready yet */
+		size_t bytes_read = client->object_size;
+		client->data_payload_size = full_object_size;
+		client->object_size = full_object_size;
+		client->data_payload_ready = bytes_read;
+		send_response(client);
 
-			//client->data_payload = realloc(client->data_payload, client->object_size);
-			//assert(client->data_payload != NULL);
-			client->data_payload_size = client->object_size;
+//		const char *etag = "123";
+//		size_t full_object_size=4096*1024;
+//		client->response_size = snprintf(NULL, 0, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: \"%s\"\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, full_object_size, etag, datetime_str, datetime_str) + 1;
+//		assert(client->response_size <= MAX_RESPONSE_SIZE);
+//		snprintf(client->response, client->response_size, "%s\r\nx-amz-request-id: %s\r\nContent-Length: %ld\r\nEtag: \"%s\"\r\nLast-Modified: %s\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, full_object_size, etag, datetime_str, datetime_str);
+//		client->response_size--;
+//		client->object_size = 4*1024*1024;
+//		client->data_payload_size =  4*1024*1024;
+//		client->data_payload_ready =  4*1024*1024;
+//		send_response(client);
 
+		if (bytes_read < full_object_size) {
+			size_t tail_size = full_object_size - bytes_read;
 			ret = rados_read(client->data_io_ctx, client->object_name, client->data_payload + bytes_read, tail_size, bytes_read);
 			assert(ret == 0);
+			client->data_payload_ready += tail_size;
+			send_response(client);
 		}
-		client->data_payload_size = client->object_size;
-		send_response(client);
+		client->aio_in_progress = 0;
 	}
 }
 
@@ -101,19 +123,6 @@ void init_object_get_request(struct http_client *client)
 	int ret;
 
 	if (strlen(client->bucket_name) != 0 && strlen(client->object_name) != 0) {
-		///* retrieve obj from OSD */
-		//if (strlen(client->bucket_name) > 0 && strlen(client->object_name) > 0) {
-		//	/* check if we want to migrate */
-		//	int acting_primary_osd_id = -1;
-		//	ret = rados_get_object_osd_position(client->data_io_ctx, client->object_name, &acting_primary_osd_id);
-		//	assert(ret == 0);
-		//	printf("/%s/%s in osd.%d\n", client->bucket_name, client->object_name, acting_primary_osd_id);
-		//}
-
-		//client->data_payload = malloc(FIRST_READ_SIZE);
-		//client->data_payload = realloc(client->data_payload, FIRST_READ_SIZE);
-		//assert(client->data_payload != NULL);
-
 		rados_release_read_op(client->read_op);
 		client->read_op = rados_create_read_op();
 
@@ -122,6 +131,7 @@ void init_object_get_request(struct http_client *client)
 		rados_read_op_read(client->read_op, 0, FIRST_READ_SIZE, client->data_payload, &(client->object_size), &prval);
 
 #ifdef ASYNC_READ
+		client->aio_in_progress = 1;
 		rados_aio_release(client->aio_head_read_completion);
 		rados_aio_create_completion((void*)client, aio_head_read_callback, NULL, &(client->aio_head_read_completion));
 		ret = rados_aio_read_op_operate(client->read_op, client->data_io_ctx, client->aio_head_read_completion, client->object_name, LIBRADOS_OPERATION_NOFLAG);
@@ -159,6 +169,8 @@ void complete_head_request(struct http_client *client, const char *datetime_str)
 			snprintf(client->response, client->response_size, "%s\r\nX-RGW-Object-Count: 430\r\nX-RGW-Bytes-Used: 1803550720\r\nX-RGW-Quota-User-Size: -1\r\nX-RGW-Quota-User-Objects: -1\r\nX-RGW-Quota-Max-Buckets: 5000\r\nX-RGW-Quota-Bucket-Size: -1\r\nX-RGW-Quota-Bucket-Objects: -1\r\nx-amz-request-id: %s\r\nContent-Length: 0\r\nDate: %s\r\n\r\n", HTTP_OK_HDR, AMZ_REQUEST_ID, datetime_str);
 			client->response_size--;
 		}
+		client->data_payload_size = 0;
+		client->data_payload_ready = 0;
 		send_response(client);
 	}
 }
@@ -235,6 +247,7 @@ void complete_post_request(struct http_client *client, const char *datetime_str)
 			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
 			client->data_payload[xmlbuf_size] = '\0';
 			client->data_payload_size = xmlbuf_size;
+			client->data_payload_ready = client->data_payload_size;
 
 			xmlFreeParserCtxt(client->xml_ctx);
 			xmlCleanupParser();
@@ -249,6 +262,7 @@ void complete_post_request(struct http_client *client, const char *datetime_str)
 		else {
 			xmlbuf_size = 0;
 			client->data_payload_size = 0;
+			client->data_payload_ready = 0;
 			//client->data_payload = NULL;
 		}
 
@@ -326,6 +340,7 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
 			client->data_payload[xmlbuf_size] = '\0';
 			client->data_payload_size = xmlbuf_size;
+			client->data_payload_ready = client->data_payload_size;
 
 			// cleanup
 			xmlFree(xmlbuf);
@@ -363,6 +378,7 @@ void complete_delete_request(struct http_client *client, const char *datetime_st
 
 		//client->data_payload = NULL;
 		client->data_payload_size = 0;
+		client->data_payload_ready = 0;
 
 		send_response(client);
 	}
@@ -393,6 +409,8 @@ void complete_put_request(struct http_client *client, const char *datetime_str)
 			client->response_size--;
 		}
 
+		client->data_payload_size = 0;
+		client->data_payload_ready = client->data_payload_size;
 		send_response(client);
 	}
 	else if (strlen(client->bucket_name) != 0 && strlen(client->object_name) != 0) {
@@ -619,6 +637,7 @@ void complete_get_request(struct http_client *client, const char *datetime_str)
 			memcpy(client->data_payload, xmlbuf, xmlbuf_size);
 			client->data_payload[xmlbuf_size] = '\0';
 			client->data_payload_size = xmlbuf_size;
+			client->data_payload_ready = client->data_payload_size;
 
 			// cleanup
 			xmlFree(xmlbuf);

@@ -1,3 +1,4 @@
+#include <numa.h>
 #include <assert.h>
 #include <time.h>
 #include <string.h>
@@ -24,24 +25,15 @@ int send_client_data(struct http_client *client)
 		iov_count++;
 	}
 
-	if (client->data_payload_sent != client->data_payload_size) {
+	//if (client->data_payload_sent != client->data_payload_size && client->data_payload_sent < client->data_payload_ready) {
+	if (client->data_payload_sent != client->data_payload_ready) {
 		iov[iov_count].iov_base = client->data_payload + client->data_payload_sent;
-		iov[iov_count].iov_len = client->data_payload_size - client->data_payload_sent;
+		iov[iov_count].iov_len = client->data_payload_ready - client->data_payload_sent;
 		iov_count++;
 	}
 
-//	struct tcp_info info_before, info_after;
-//
-//	socklen_t slen = sizeof(info_before);
-//	int err = getsockopt(client->fd, IPPROTO_TCP, TCP_INFO, &info_before, &slen);
-//	assert(err == 0);
-
-	//zlog_debug(zlog_object_store, "to writev");
 	ssize_t ret = writev(client->fd, iov, iov_count);
-//	ssize_t original_ret = ret;
 	if (ret > 0) {
-		//err = getsockopt(client->fd, IPPROTO_TCP, TCP_INFO, &info_after, &slen);
-		//assert(err == 0);
 		// response is not complete sent
 		if (client->response_sent != client->response_size) {
 			size_t response_left = client->response_size - client->response_sent;
@@ -56,11 +48,7 @@ int send_client_data(struct http_client *client)
 		}
 
 		client->data_payload_sent += ret;
-		//zlog_debug(zlog_object_store, "writev ret=%d (fd=%d,port=%d) called (%ld/%ld,%ld/%ld) tcpi_snd_cwnd (%u->%u) tcpi_lost (%u->%u) tcpi_last_data_sent (%u->%u) tcpi_retrans (%u->%u)", original_ret, client->fd, ntohs(client->client_port), client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size, info_before.tcpi_snd_cwnd, info_after.tcpi_snd_cwnd, info_before.tcpi_lost, info_after.tcpi_lost, info_before.tcpi_last_data_sent, info_after.tcpi_last_data_sent, info_before.tcpi_retrans, info_after.tcpi_retrans);
-		//fflush(stdout);
-		//if (info_after.tcpi_snd_cwnd < info_before.tcpi_snd_cwnd) {
-		//	exit(1);
-		//}
+		zlog_debug(zlog_object_store, "writev ret=%d (fd=%d,port=%d) called (%ld/%ld,%ld/%ld)", ret, client->fd, ntohs(client->client_port), client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
 	} else {
 		if (ret == 0 || (ret == -1 && errno != EAGAIN)) {
 			zlog_error(zlog_object_store, "writev returned %ld on (fd=%d,port=%d) (%s)\n", ret, client->fd, ntohs(client->client_port), strerror(errno));
@@ -68,13 +56,17 @@ int send_client_data(struct http_client *client)
 		}
 	}
 
-	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
-		reset_http_client(client);
+	/* all currently avaliable payload sent, stop triggering */
+	if (client->response_size == client->response_sent && client->data_payload_ready == client->data_payload_sent) {
 		struct epoll_event event = {};
 		event.data.ptr = client;
-		//event.data.u32 = client->epoll_data_u32;
 		event.events = EPOLLIN;
 		epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
+	}
+
+	/* all payload sent */
+	if (client->response_size == client->response_sent && client->data_payload_size == client->data_payload_sent) {
+		reset_http_client(client);
 	}
 
 	return 0;
@@ -390,11 +382,19 @@ static int on_headers_complete_cb(llhttp_t* parser)
 
 void reset_http_client(struct http_client *client)
 {
-//	for (size_t i = 0; i < client->num_fields; i++) {
-//		if (client->header_fields[i]) free(client->header_fields[i]);
-//		if (client->header_values[i]) free(client->header_values[i]);
-//	}
-
+	if (client->aio_in_progress && !rados_aio_is_complete_and_cb(client->aio_head_read_completion)) {
+		rados_aio_cancel(client->data_io_ctx, client->aio_head_read_completion);
+		rados_aio_wait_for_complete_and_cb(client->aio_head_read_completion);
+		zlog_debug(zlog_object_store,"finishing aio");
+	}
+	if (client->aio_in_progress && !rados_aio_is_complete_and_cb(client->aio_completion)) {
+		rados_aio_cancel(client->data_io_ctx, client->aio_completion);
+		rados_aio_wait_for_complete_and_cb(client->aio_completion);
+		zlog_debug(zlog_object_store,"finishing aio");
+	}
+	//if (!rados_aio_is_complete_and_cb(client->aio_completion)) {
+	//}
+	//rados_aio_wait_for_complete(client->aio_completion);
 	client->to_migrate = -1;
 	client->acting_primary_osd_id = -1;
 	client->proto_buf_sent = 0;
@@ -411,30 +411,13 @@ void reset_http_client(struct http_client *client)
 	memset(client->bucket_name, 0, 64);
 	memset(client->object_name, 0, 1025);
 
-//	if (client->put_buf != NULL)  {
-//		free(client->put_buf);
-//		client->put_buf = NULL;
-		client->object_offset = 0;
-//	}
+	client->object_offset = 0;
 
 	client->response_size = 0;
 	client->response_sent = 0;
-	//if (client->response != NULL) {
-	//	free(client->response);
-	//	client->response = NULL;
-	//	client->response_size = 0;
-	//	client->response_sent = 0;
-	//}
 
-	//memset(client->data_payload, 0, 1024*1024*4);
 	client->data_payload_size = 0;
 	client->data_payload_sent = 0;
-	//if (client->data_payload != NULL) {
-	//	free(client->data_payload);
-	//	client->data_payload = NULL;
-	//	client->data_payload_size = 0;
-	//	client->data_payload_sent = 0;
-	//}
 
 	client->prval = 0;
 	client->object_size = 0;
@@ -454,6 +437,12 @@ void reset_http_client(struct http_client *client)
 struct http_client *create_http_client(int epoll_fd, int fd)
 {
 	struct http_client *client = (struct http_client*)calloc(1, sizeof(struct http_client));
+	//struct http_client *client;
+	//posix_memalign(&client, 64, sizeof(struct http_client));
+//printf("%d\n", sizeof(struct http_client));
+//exit(1);
+	//struct http_client *client = (struct http_client*)numa_alloc_local(sizeof(struct http_client) + 33*sizeof(char));
+	memset(client, 0, sizeof(struct http_client));
 
 	llhttp_settings_init(&(client->settings));
 	llhttp_init(&(client->parser), HTTP_BOTH, &(client->settings));
@@ -467,16 +456,11 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	client->settings.on_reset = on_reset_cb;
 	client->settings.on_body = on_body_cb;
 
+	//client->data_payload = numa_alloc_local(sizeof(char)*1024*1024*4);
 	client->put_buf = malloc(0);
 	//client->data_payload = malloc(0);
 	//client->response = NULL;
 	//client->uri_str = malloc(0);
-	reset_http_client(client);
-
-	client->epoll_fd = epoll_fd;
-	client->epoll_data_u32 = 0;
-	client->fd = fd;
-	client->parser.data = client;
 
 //	client->header_fields = (char**)malloc(sizeof(char*) * MAX_FIELDS);
 //	client->header_values = (char**)malloc(sizeof(char*) * MAX_FIELDS);
@@ -485,12 +469,14 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	client->read_op = rados_create_read_op();
 	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_completion));
 	rados_aio_create_completion((void*)client, NULL, NULL, &(client->aio_head_read_completion));
+	client->aio_in_progress = 0;
+
 	client->bucket_io_ctx = NULL;
 	client->data_io_ctx = NULL;
 
 	client->prval = 0;
-
 	client->from_migrate = -1;
+	reset_http_client(client);
 
 	client->tls.is_ssl = true;
 	client->tls.is_handshake_done = false;
@@ -501,6 +487,12 @@ struct http_client *create_http_client(int epoll_fd, int fd)
 	client->tls.client_hello_check_off = false;
 	client->tls.is_client_traffic_secret_set = false;
 	client->tls.is_server_traffic_secret_set = false;
+
+
+	client->epoll_fd = epoll_fd;
+	client->epoll_data_u32 = 0;
+	client->fd = fd;
+	client->parser.data = client;
 
 	return client;
 }
@@ -513,7 +505,7 @@ void free_http_client(struct http_client *client)
 //	free(client->header_fields);
 //	free(client->header_values);
 	//free(client->uri_str);
-	//free(client->data_payload);
+	//numa_free(client->data_payload, 1024*1024*4);
 	free(client->put_buf);
 
 	rados_aio_release(client->aio_head_read_completion);
@@ -521,5 +513,5 @@ void free_http_client(struct http_client *client)
 	rados_release_write_op(client->write_op);
 	rados_release_read_op(client->read_op);
 
-	free(client);
+	//numa_free(client, sizeof(struct http_client));
 }

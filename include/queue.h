@@ -17,7 +17,7 @@ extern zlog_category_t *zlog_queue;
 //        RULE_REMOVE
 //} operation_t;
 
-struct rule_args {
+struct __attribute__((packed)) rule_args {
 	volatile bool skip;
 	volatile bool in_progress;
 //	operation_t op;
