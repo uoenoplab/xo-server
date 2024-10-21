@@ -25,7 +25,6 @@ int send_client_data(struct http_client *client)
 		iov_count++;
 	}
 
-	//if (client->data_payload_sent != client->data_payload_size && client->data_payload_sent < client->data_payload_ready) {
 	if (client->data_payload_sent != client->data_payload_ready) {
 		iov[iov_count].iov_base = client->data_payload + client->data_payload_sent;
 		iov[iov_count].iov_len = client->data_payload_ready - client->data_payload_sent;
@@ -48,7 +47,7 @@ int send_client_data(struct http_client *client)
 		}
 
 		client->data_payload_sent += ret;
-		zlog_debug(zlog_object_store, "writev ret=%d (fd=%d,port=%d) called (%ld/%ld,%ld/%ld)", ret, client->fd, ntohs(client->client_port), client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_size);
+		zlog_debug(zlog_object_store, "writev ret=%d (fd=%d,port=%d) called (%ld/%ld,%ld/%ld/%ld)", ret, client->fd, ntohs(client->client_port), client->response_sent, client->response_size, client->data_payload_sent, client->data_payload_ready, client->data_payload_size);
 	} else {
 		if (ret == 0 || (ret == -1 && errno != EAGAIN)) {
 			zlog_error(zlog_object_store, "writev returned %ld on (fd=%d,port=%d) (%s)\n", ret, client->fd, ntohs(client->client_port), strerror(errno));
@@ -61,6 +60,7 @@ int send_client_data(struct http_client *client)
 		struct epoll_event event = {};
 		event.data.ptr = client;
 		event.events = EPOLLIN;
+
 		epoll_ctl(client->epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
 	}
 

@@ -7,7 +7,7 @@
 #include "object_store.h"
 #include "osd_mapping.h"
 
-#define FIRST_READ_SIZE sizeof(char) * 1024 * 1024
+#define FIRST_READ_SIZE sizeof(char) * 1024 * 1024 * 1
 
 zlog_category_t *zlog_object_store;
 
@@ -33,10 +33,9 @@ void aio_read_callback(rados_completion_t comp, void *arg) {
 	int ret = 0;
 	struct http_client *client = (struct http_client*)arg;
 
-	//client->data_payload_ready += client->tail_object_size;
 	client->data_payload_ready = client->object_size;
 	client->aio_in_progress = 0;
-	zlog_debug(zlog_object_store, "second part of object ready to send");
+	zlog_debug(zlog_object_store, "Got the rest of the object (fd=%d,object_name=%s,port=%d)", client->fd, client->object_name, ntohs(client->client_port));
 	send_response(client);
 }
 
@@ -45,7 +44,6 @@ void aio_head_read_callback(rados_completion_t comp, void *arg) {
 	struct http_client *client = (struct http_client*)arg;
 	char datetime_str[128];
 	get_datetime_str(datetime_str, 128);
-	//client->prval=0;
 
 	if (client->prval != 0 && strlen(client->object_name) != 0) {
 		zlog_error(zlog_object_store, "Object %s not found", client->object_name);
@@ -107,12 +105,23 @@ void aio_head_read_callback(rados_completion_t comp, void *arg) {
 
 		if (bytes_read < full_object_size) {
 			size_t tail_size = full_object_size - bytes_read;
+#ifdef USE_ASYNC_RAD
+			rados_aio_release(client->aio_completion);
+			rados_aio_create_completion((void*)client, aio_read_callback, NULL, &(client->aio_completion));
+			ret = rados_aio_read(client->data_io_ctx, client->object_name, client->aio_completion, client->data_payload + bytes_read, tail_size, bytes_read);
+			assert(ret == 0);
+#else
+			zlog_debug(zlog_object_store, "Getting rest of the object %ld (fd=%d,object_name=%s,port=%d)", tail_size, client->fd, client->object_name, ntohs(client->client_port));
 			ret = rados_read(client->data_io_ctx, client->object_name, client->data_payload + bytes_read, tail_size, bytes_read);
 			assert(ret == 0);
 			client->data_payload_ready += tail_size;
+			client->aio_in_progress = 0;
+			zlog_debug(zlog_object_store, "Got the rest of the object %ld (fd=%d,object_name=%s,port=%d)", tail_size, client->fd, client->object_name, ntohs(client->client_port));
 			send_response(client);
+#endif
 		}
-		client->aio_in_progress = 0;
+		else
+			client->aio_in_progress = 0;
 	}
 }
 

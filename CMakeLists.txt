@@ -173,11 +173,11 @@ set_target_properties(server.out PROPERTIES
 
 target_compile_options(server.out PRIVATE
     ${INIH_CFLAGS_OTHER}
-    -fstack-protector-all -O3 -Wall -Wextra -g)
-#-fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector -O3 -Wall -Wextra -g)
+    -fstack-protector-strong -O3 -Wall -Wextra -g)
+#-fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector-strong -O3 -Wall -Wextra -g)
 target_link_options(server.out PRIVATE
-    -fstack-protector-all -O3 -Wall -Wextra -g)
-#-fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector -O3 -Wall -Wextra -g)
+    -fstack-protector-strong -O3 -Wall -Wextra -g)
+#-fsanitize=address,undefined -fno-omit-frame-pointer -fstack-protector-strong -O3 -Wall -Wextra -g)
 
 ## install binary, library, and public header
 #install(TARGETS s3_benchmark.out DESTINATION bin)

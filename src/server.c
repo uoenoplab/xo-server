@@ -359,7 +359,7 @@ static void *conn_wait(void *arg)
 	struct thread_param *param = (struct thread_param*)arg;
 	int server_fd = -1;
 	int thread_id = param->thread_id;
-	rados_t cluster = param->cluster;
+	rados_t cluster; // = param->cluster;
 
 	//char client_data_buffer[BUF_SIZE];
 	char *client_data_buffer = malloc(BUF_SIZE);
@@ -375,7 +375,26 @@ static void *conn_wait(void *arg)
 		exit(EXIT_FAILURE);
 	}
 
-	int err = rados_ioctx_create(cluster, BUCKET_POOL, &bucket_io_ctx);
+	int err = 0;
+	err = rados_create2(&cluster, "ceph", "client.admin", 0);
+	if (err < 0) {
+		zlog_fatal(zlog_object_store, "cannot create a cluster handle: %s", strerror(-err));
+		exit(1);
+	}
+
+	err = rados_conf_read_file(cluster, "/etc/ceph/ceph.conf");
+	if (err < 0) {
+		zlog_fatal(zlog_object_store, "cannot read config file");
+		exit(1);
+	}
+
+	err = rados_connect(cluster);
+	if (err < 0) {
+		zlog_fatal(zlog_object_store, "cannot connect to cluster");
+		exit(EXIT_FAILURE);
+	}
+
+	err = rados_ioctx_create(cluster, BUCKET_POOL, &bucket_io_ctx);
 	if (err < 0) {
 		zlog_fatal(zlog_object_store, "cannot open rados pool %s", BUCKET_POOL);
 		rados_shutdown(cluster);
@@ -470,7 +489,7 @@ static void *conn_wait(void *arg)
 	while (server_running) {
 		// Wait for events using epoll
 		memset(events, 0, sizeof(struct epoll_event) * MAX_EVENTS);
-		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, 50);
+		event_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
 		if (event_count == -1) {
 			if (errno == EINTR) {
 				//printf("EINTR\n");
@@ -499,7 +518,7 @@ static void *conn_wait(void *arg)
 					handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
 				} else if (events[i].events & EPOLLOUT) {
 					ret = send_client_data(c);
-					zlog_debug(zlog_server, "S3_HTTP_EVENT send_client_data (fd=%d)", c->fd);
+					zlog_debug(zlog_server, "S3_HTTP_EVENT send_client_data (fd=%d,events=%d,object_name=%s,port=%d)", c->fd, events[i].events, c->object_name, ntohs(c->client_port));
 					if (ret == -1) {
 						zlog_debug(zlog_server, "S3_HTTP_EVENT client disconnected after send_client_data (fd=%d)", c->fd);
 						handle_client_disconnect(epoll_fd, c, param->thread_id, handoff_out_ctxs);
@@ -661,6 +680,7 @@ static void *conn_wait(void *arg)
 	}
 #endif
 
+	rados_shutdown(cluster);
 	close(server_fd);
 	close(epoll_fd);
 
@@ -769,7 +789,6 @@ static int ceph_config_parser(void* user, const char* section, const char* name,
 
 int main(int argc, char *argv[])
 {
-	rados_t cluster;
 	struct sigaction sa;
 	int err;
 
@@ -841,8 +860,10 @@ int main(int argc, char *argv[])
 		enable_migration = false;
 
 	// initialize libforward-tc
-	err = init_forward(argv[1], "ingress", "1:");
-	assert(err >= 0);
+	if (enable_migration) {
+		err = init_forward(argv[1], "ingress", "1:");
+		assert(err >= 0);
+	}
 
 	if (atoi(argv[4]) == 1)
 		use_tc = true;
@@ -899,24 +920,6 @@ int main(int argc, char *argv[])
 	err = rearrange_osd_addrs(ifname);
 	assert(err == 0);
 
-	err = rados_create2(&cluster, "ceph", "client.admin", 0);
-	if (err < 0) {
-		zlog_fatal(zlog_object_store, "%s: cannot create a cluster handle: %s", argv[0], strerror(-err));
-		exit(1);
-	}
-
-	err = rados_conf_read_file(cluster, "/etc/ceph/ceph.conf");
-	if (err < 0) {
-		zlog_fatal(zlog_object_store, "cannot read config file");
-		exit(1);
-	}
-
-	err = rados_connect(cluster);
-	if (err < 0) {
-		zlog_fatal(zlog_object_store, "cannot connect to cluster");
-		exit(EXIT_FAILURE);
-	}
-
 	cpu_set_t cpus;
 	pthread_attr_t attr;
 	sigset_t sigmask;
@@ -936,7 +939,7 @@ int main(int argc, char *argv[])
 	CPU_ZERO(&cpus);
 	CPU_SET(0, &cpus);
 	pthread_t current_thread = pthread_self();
-	pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpus);
+	//pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpus);
 
 #ifdef USE_MIGRATION
 	pthread_t rule_consumer;
@@ -957,10 +960,10 @@ int main(int argc, char *argv[])
 		CPU_SET(max_cores - 1, &cpus);
 
 		/* create the consumer thread */
-		//rc = pthread_attr_setsigmask_np(&attr, &sigmask);
-		//assert(rc == 0);
-		rc = pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
+		rc = pthread_attr_setsigmask_np(&attr, &sigmask);
 		assert(rc == 0);
+		//rc = pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
+		//assert(rc == 0);
 		rc = pthread_create(&rule_consumer, &attr, &rule_q_consumer, q);
 		assert(rc == 0);
 		rc = pthread_detach(rule_consumer);
@@ -971,14 +974,14 @@ int main(int argc, char *argv[])
 	zlog_info(zlog_server, "Launching %ld threads", nproc);
 	for (int i = 0; i < nproc; i++) {
 		param[i].thread_id = i;
-		param[i].cluster = cluster;
+		//param[i].cluster = cluster;
 		strncpy(param[i].ifname, ifname, 32);
 
 		CPU_ZERO(&cpus);
-		CPU_SET((i + (max_cores - 1)) % (max_cores - 1), &cpus);
+		CPU_SET((i + (max_cores)) % (max_cores), &cpus);
 
 		pthread_attr_setsigmask_np(&attr, &sigmask);
-		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
+		//pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
 
 		if (pthread_create(&threads[i], &attr, &conn_wait, &param[i]) != 0) {
 			zlog_fatal(zlog_server, "fail to create thread %d", i);
@@ -1007,15 +1010,18 @@ int main(int argc, char *argv[])
 //	}
 #endif
 
-	rados_shutdown(cluster);
 	pthread_attr_destroy(&attr);
 
 	for (int i = 0; i < num_osds; i++) {
 		if (osd_addr_strs[i] != NULL) free(osd_addr_strs[i]);
 	}
 
-	fini_forward();
-	fini_forward_ebpf();
+#ifdef USE_MIGRATION
+	if (enable_migration) {
+		fini_forward();
+		fini_forward_ebpf();
+	}
+#endif
 	zlog_info(zlog_server, "%s terminated", argv[0]);
 	zlog_fini();
 
