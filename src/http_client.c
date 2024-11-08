@@ -514,4 +514,5 @@ void free_http_client(struct http_client *client)
 	rados_release_read_op(client->read_op);
 
 	//numa_free(client, sizeof(struct http_client));
+	free(client);
 }

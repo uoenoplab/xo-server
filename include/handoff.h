@@ -33,7 +33,7 @@ extern zlog_category_t *zlog_handoff;
 extern bool use_tc;
 extern bool tc_offload;
 extern bool tc_hybrid;
-#define Q_SIZE 50
+#define Q_SIZE 1000
 extern rule_queue_t *q;
 
 enum {

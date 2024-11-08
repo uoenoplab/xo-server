@@ -52,7 +52,7 @@ enum THREAD_EPOLL_EVENT {
 // 5.  check end of payload
 // 5.1 wait for async completion, respond http OK
 
-const size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 4;
+const size_t BUF_SIZE = sizeof(char) * 1024 * 1024 * 8;
 
 volatile sig_atomic_t server_running = 1;
 
@@ -1009,7 +1009,6 @@ int main(int argc, char *argv[])
 //		rule_queue_destroy(q);
 //	}
 #endif
-
 	pthread_attr_destroy(&attr);
 
 	for (int i = 0; i < num_osds; i++) {

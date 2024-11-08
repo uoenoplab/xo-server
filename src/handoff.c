@@ -24,6 +24,8 @@
 //#define USE_TC
 //#define TC_OFFLOAD false
 
+#define HYBRID_THRESHOLD 2097152
+
 bool use_tc = false;
 bool tc_offload = false;
 bool tc_hybrid = false;
@@ -846,8 +848,7 @@ void handoff_out_recv(struct handoff_out *out_ctx)
 				args.block = false;
 				args.hw_offload = tc_offload;
 
-				//if ((migration_info->object_size < 3072 && migration_info->object_size > 5000) || !rule_enqueue(q, &args)) {
-				if (!rule_enqueue(q, &args)) {
+				if ((migration_info->object_size < HYBRID_THRESHOLD) || !rule_enqueue(q, &args)) {
 					/* queue is full, insert dummy rule and give up hw rule */
 					ret = apply_redirection_dummy(migration_info->peer_addr, migration_info->self_addr,
 								migration_info->peer_port, htons(ntohs(migration_info->self_port) - get_my_osd_id() - 1),
@@ -1069,12 +1070,12 @@ void handoff_in_deserialize(struct handoff_in *in_ctx, SocketSerialize *migratio
 	time_t pmtime;
 
 	rados_completion_t comp;
-//	if ((migration_info->msg_type == HANDOFF_BACK_REQUEST && migration_info->acting_primary_osd_id == get_my_osd_id()) || migration_info->msg_type == HANDOFF_REQUEST) {
-//		ret = rados_aio_create_completion(NULL, NULL, NULL, &comp);
-//		assert(ret == 0);
-//		ret = rados_aio_stat(in_ctx->data_io_ctx, migration_info->object_name, comp, &psize, &pmtime);
-//		assert(ret == 0);
-//	}
+	if ((migration_info->msg_type == HANDOFF_BACK_REQUEST && migration_info->acting_primary_osd_id == get_my_osd_id()) || migration_info->msg_type == HANDOFF_REQUEST) {
+		ret = rados_aio_create_completion(NULL, NULL, NULL, &comp);
+		assert(ret == 0);
+		ret = rados_aio_stat(in_ctx->data_io_ctx, migration_info->object_name, comp, &psize, &pmtime);
+		assert(ret == 0);
+	}
 
 	int rfd;
 	struct sockaddr_in server_sin, client_sin;
@@ -1290,13 +1291,13 @@ retry:
 
 	client->fd = rfd;
 
-//	if ((migration_info->msg_type == HANDOFF_BACK_REQUEST && migration_info->acting_primary_osd_id == get_my_osd_id()) || migration_info->msg_type == HANDOFF_REQUEST) {
-//		ret = rados_aio_wait_for_complete(comp);
-//		assert(ret == 0);
-//		rados_aio_release(comp);
-//		client->object_size = psize;
-//		migration_info->object_size = psize;
-//	}
+	if ((migration_info->msg_type == HANDOFF_BACK_REQUEST && migration_info->acting_primary_osd_id == get_my_osd_id()) || migration_info->msg_type == HANDOFF_REQUEST) {
+		ret = rados_aio_wait_for_complete(comp);
+		assert(ret == 0);
+		rados_aio_release(comp);
+		client->object_size = psize;
+		migration_info->object_size = psize;
+	}
 
 	zlog_debug(zlog_handoff, "Deserialized: %s (size=%ld) (fd=%d,port=%d)", client->uri_str, psize, client->fd, client->client_port);
 
